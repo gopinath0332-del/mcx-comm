@@ -1,0 +1,289 @@
+//@version=4
+strategy("Gold Trend filter", overlay=true, pyramiding=0)
+
+// =====================================================================
+// INPUTS
+// =====================================================================
+
+enter_period = input(20, minval=1, title="Enter Channel")
+exit_period  = input(10, minval=1, title="Exit Channel")
+
+mode = input("Both", title="Trade Mode", options=["Long", "Short", "Both"])
+
+allowLong  = mode == "Long" or mode == "Both"
+allowShort = mode == "Short" or mode == "Both"
+
+// ATR / Risk
+atrmultTP    = input(1.0, title="ATR TP Multiplier")
+atrmultTrail = input(2.0, title="ATR Trailing SL Multiplier")
+atrperiod    = input(20, title="ATR Period")
+
+// Partial TP
+enablePartialTP = input(true, title="Enable 50% Partial Take Profit")
+
+// Long Duration Filter
+barsPerDay  = input(24, title="Bars per Day (1H = 24)")
+minLongDays = input(2, title="Minimum Long Duration (Days)")
+minLongBars = barsPerDay * minLongDays
+
+// =====================================================================
+// FIRST CANDLES FILTER
+// =====================================================================
+
+// OFF = Original Strategy
+// ON  = Skip entries occurring during opening candles
+enableSkipFirstBars = input(false, title="Skip Opening Candles")
+
+// Set this to 2 to skip the first and second candles
+barsToSkip = input(2, title="Number of Opening Candles to Skip", minval=0)
+
+// =====================================================================
+// BACKGROUND SETTINGS
+// =====================================================================
+
+enableBg       = input(true, title="Enable Position Background")
+longBaseColor  = input(color.green, title="Long BG Color")
+shortBaseColor = input(color.red, title="Short BG Color")
+transp         = input(85, title="Transparency", minval=0, maxval=100)
+
+longBg  = color.new(longBaseColor, transp)
+shortBg = color.new(shortBaseColor, transp)
+
+// =====================================================================
+// ATR CALCULATIONS
+// =====================================================================
+
+atr = ema(tr(true), atrperiod)
+
+// =====================================================================
+// CHANNEL CALCULATIONS
+// =====================================================================
+
+upper = highest(enter_period)
+lower = lowest(exit_period)
+
+plot(upper, title="Upper Channel", color=color.green)
+plot(lower, title="Lower Channel", color=color.red)
+
+// =====================================================================
+// EMA TREND FILTER
+// =====================================================================
+
+emaLength = input(100, title="EMA Length for Trend Filter")
+emaTrend  = ema(close, emaLength)
+
+plot(emaTrend, title="Trend EMA", color=color.yellow)
+
+// =====================================================================
+// CHANNEL CONDITIONS
+// =====================================================================
+
+breakUp   = close >= upper[1]
+breakDown = close <= lower[1]
+
+longStopChannel  = close <= lower[1]
+shortStopChannel = close >= upper[1]
+
+// =====================================================================
+// COUNT CANDLES FROM START OF EACH DAY
+// =====================================================================
+
+newDay = change(time("D"))
+
+var int dayBarCount = 0
+
+if newDay
+    dayBarCount := 1
+else
+    dayBarCount := dayBarCount + 1
+
+// Filter OFF:
+// All candles are allowed.
+//
+// Filter ON + barsToSkip = 2:
+// Candle 1 = blocked
+// Candle 2 = blocked
+// Candle 3 onwards = allowed
+
+allowEntryToday = not enableSkipFirstBars or dayBarCount > barsToSkip
+
+// =====================================================================
+// TRACK LONG TRADE DURATION
+// =====================================================================
+
+var int longEntryBar = na
+var int lastLongBars = 0
+
+if strategy.position_size > 0 and strategy.position_size[1] <= 0
+    longEntryBar := bar_index
+
+if strategy.position_size == 0 and strategy.position_size[1] > 0
+    lastLongBars := bar_index - longEntryBar
+
+longHeldEnough = lastLongBars >= minLongBars
+
+// =====================================================================
+// ENTRY CONDITIONS
+// =====================================================================
+
+longCondition = allowLong and allowEntryToday and breakUp and close > emaTrend and strategy.position_size <= 0
+
+shortCondition = allowShort and allowEntryToday and breakDown and longHeldEnough and close < emaTrend and strategy.position_size == 0
+
+// =====================================================================
+// 50% PARTIAL TAKE PROFIT
+// =====================================================================
+
+entryPrice = strategy.position_size != 0 ? strategy.position_avg_price : close
+
+longTP  = entryPrice + atr * atrmultTP
+shortTP = entryPrice - atr * atrmultTP
+
+if enablePartialTP
+    strategy.exit("BUY_TP_50", from_entry="BUY", qty_percent=50, limit=longTP)
+    strategy.exit("SELL_TP_50", from_entry="SELL", qty_percent=50, limit=shortTP)
+
+// =====================================================================
+// ATR TRAILING STOP
+// =====================================================================
+
+var float longTrail  = na
+var float shortTrail = na
+
+if strategy.position_size == 0 and not longCondition and not shortCondition
+    longTrail := na
+    shortTrail := na
+
+if strategy.position_size > 0 or longCondition
+    newLongTrail = close - atr * atrmultTrail
+    longTrail := na(longTrail) ? newLongTrail : max(longTrail, newLongTrail)
+
+if strategy.position_size < 0 or shortCondition
+    newShortTrail = close + atr * atrmultTrail
+    shortTrail := na(shortTrail) ? newShortTrail : min(shortTrail, newShortTrail)
+
+longTrailHit  = strategy.position_size > 0 and close <= longTrail
+shortTrailHit = strategy.position_size < 0 and close >= shortTrail
+
+// =====================================================================
+// PLOT TP AND TRAILING STOP
+// =====================================================================
+
+longTrail_pos = (strategy.position_size > 0 or longCondition) ? longTrail : na
+
+shortTrail_pos = (strategy.position_size < 0 or shortCondition) ? shortTrail : na
+
+plot(
+     enablePartialTP and (strategy.position_size > 0 or longCondition) ? longTP : na,
+     title="Long TP",
+     color=color.blue,
+     linewidth=2,
+     style=plot.style_linebr
+     )
+
+plot(
+     enablePartialTP and (strategy.position_size < 0 or shortCondition) ? shortTP : na,
+     title="Short TP",
+     color=color.orange,
+     linewidth=2,
+     style=plot.style_linebr
+     )
+
+plot(
+     longTrail_pos,
+     title="Long Trailing SL",
+     color=color.red,
+     linewidth=2,
+     style=plot.style_linebr
+     )
+
+plot(
+     shortTrail_pos,
+     title="Short Trailing SL",
+     color=color.green,
+     linewidth=2,
+     style=plot.style_linebr
+     )
+
+// =====================================================================
+// ALERT TRACKING
+// =====================================================================
+
+var bool longTPAlerted  = false
+var bool shortTPAlerted = false
+
+isNewLong = strategy.position_size > 0 and strategy.position_size[1] <= 0
+
+isNewShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+wentFlat = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if isNewLong or isNewShort or wentFlat
+    longTPAlerted  := false
+    shortTPAlerted := false
+
+// =====================================================================
+// TAKE PROFIT ALERTS
+// =====================================================================
+
+if enablePartialTP and strategy.position_size > 0 and not longTPAlerted and high >= longTP
+    alert("LONG TAKE PROFIT HIT (50% closed)", alert.freq_once_per_bar_close)
+    longTPAlerted := true
+
+if enablePartialTP and strategy.position_size < 0 and not shortTPAlerted and low <= shortTP
+    alert("SHORT TAKE PROFIT HIT (50% closed)", alert.freq_once_per_bar_close)
+    shortTPAlerted := true
+
+// =====================================================================
+// TRAILING STOP ALERTS
+// =====================================================================
+
+if longTrailHit
+    alert("LONG TRAILING STOP HIT (Remaining closed)", alert.freq_once_per_bar_close)
+
+if shortTrailHit
+    alert("SHORT TRAILING STOP HIT (Remaining closed)", alert.freq_once_per_bar_close)
+
+// =====================================================================
+// LONG ENTRY
+// =====================================================================
+
+if longCondition
+    strategy.close("SELL")
+    strategy.entry("BUY", strategy.long)
+    alert("BUY", alert.freq_once_per_bar_close)
+
+// =====================================================================
+// LONG EXIT
+// =====================================================================
+
+if strategy.position_size > 0 and (breakDown or longStopChannel or longTrailHit)
+    strategy.close("BUY")
+    alert("EXIT BUY", alert.freq_once_per_bar_close)
+
+// =====================================================================
+// SHORT ENTRY
+// =====================================================================
+
+if shortCondition
+    strategy.entry("SELL", strategy.short)
+    alert("SELL (Long > 2 Days)", alert.freq_once_per_bar_close)
+
+// =====================================================================
+// SHORT EXIT
+// =====================================================================
+
+if strategy.position_size < 0 and (breakUp or shortStopChannel or shortTrailHit)
+    strategy.close("SELL")
+    alert("EXIT SELL", alert.freq_once_per_bar_close)
+
+// =====================================================================
+// BACKGROUND COLOR
+// =====================================================================
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+bgColor = enableBg and inLong ? longBg : enableBg and inShort ? shortBg : na
+
+bgcolor(bgColor)
