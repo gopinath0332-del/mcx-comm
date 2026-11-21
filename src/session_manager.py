@@ -102,6 +102,7 @@ class SessionManager:
             capital=settings.capital,
             base_risk_pct=settings.base_risk_pct,
             lot_multiplier=settings.lot_multiplier,
+            max_lots=getattr(settings, "max_lots", None),
         )
         self._order_mgr = OrderManager(
             kite=self._kite,

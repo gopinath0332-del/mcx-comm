@@ -33,21 +33,20 @@ def _make_instruments(expiries: list[date]) -> list[dict]:
 class TestContractSelector:
     def test_selects_nearest_next_month_expiry(self, monkeypatch):
         selector = ContractSelector(instrument_prefix="GOLDPETAL", exchange="MCX")
-        today = date(2026, 11, 21)
         instruments = _make_instruments([
-            date(2026, 11, 28),   # soonest after today
-            date(2026, 12, 29),
+            date(2026, 11, 28),   # near/current month
+            date(2026, 12, 29),   # next month
             date(2027, 1, 30),
         ])
         selector._instruments_cache = instruments
-        # Monkeypatch IST "now" to control "today"
         monkeypatch.setattr(
             "src.contract_selector.datetime",
             type("FakeDT", (), {"now": staticmethod(lambda tz=None: datetime(2026, 11, 21, 10, 0, tzinfo=IST))}),
         )
         symbol, token = selector._select_next_month(instruments)
-        assert symbol == "GOLDPETAL26NOVFUT"
-        assert token == 1000000
+        # Should select next month (DEC), not near month (NOV)
+        assert symbol == "GOLDPETAL26DECFUT"
+        assert token == 1000001
 
     def test_skips_expired_contracts(self, monkeypatch):
         selector = ContractSelector(instrument_prefix="GOLDPETAL", exchange="MCX")

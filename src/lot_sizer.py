@@ -56,13 +56,13 @@ class LotSizer:
         base_risk_pct: float = 2.0,
         lot_multiplier: int = 1,
         atr_size_multiplier: float = LOT_SIZE_ATR_MULTIPLIER,
-        max_lots: int = 20,
+        max_lots: int | None = None,
     ) -> None:
         self.capital            = float(capital)
         self.base_risk_pct      = float(base_risk_pct)
         self.lot_multiplier     = int(lot_multiplier)
         self.atr_size_multiplier = float(atr_size_multiplier)
-        self.max_lots           = int(max_lots)
+        self.max_lots           = int(max_lots) if max_lots is not None and max_lots > 0 else None
 
     # ------------------------------------------------------------------
     # Public API
@@ -80,7 +80,7 @@ class LotSizer:
         Returns
         -------
         int
-            Number of lots (minimum 1, maximum max_lots).
+            Number of lots (minimum 1, capped at max_lots if configured).
         """
         if atr <= 0:
             logger.warning("ATR is %.4f (≤ 0); defaulting to 1 lot.", atr)
@@ -94,7 +94,9 @@ class LotSizer:
             return 1
 
         lots = math.floor(risk_amount / stop_distance)
-        lots = max(1, min(lots, self.max_lots))
+        lots = max(1, lots)
+        if self.max_lots is not None:
+            lots = min(lots, self.max_lots)
 
         logger.info(
             "LotSizer: Capital=₹%.0f | Risk=%.1f%% (₹%.0f) | ATR=%.2f | "

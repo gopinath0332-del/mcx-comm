@@ -17,12 +17,17 @@ class TestLotSizer:
         )
 
     def test_basic_calculation(self):
-        sizer = self._sizer()
-        # risk_amount = 200000 * 2% = 4000
-        # stop_dist   = ATR(50) * 1.5 * 1 = 75
-        # lots        = floor(4000 / 75) = 53  → capped at 20
-        lots = sizer.calculate(atr=50.0)
-        assert lots == 20   # max_lots cap
+        # Without cap: risk=4000, stop=50*1.5=75, lots=floor(4000/75)=53
+        sizer_uncapped = LotSizer(capital=200000, base_risk_pct=2.0, lot_multiplier=1, atr_size_multiplier=1.5, max_lots=None)
+        assert sizer_uncapped.calculate(atr=50.0) == 53
+
+        # Exactly matches user's screenshot: capital=200000, risk=2%, atr=56.48, mult=1.5 -> 47 lots
+        sizer_real = LotSizer(capital=200000, base_risk_pct=2.0, lot_multiplier=1, atr_size_multiplier=1.5)
+        assert sizer_real.calculate(atr=56.48) == 47
+
+        # With explicit max cap:
+        sizer_capped = self._sizer(capital=200000, risk_pct=2.0, lot_mult=1)
+        assert sizer_capped.calculate(atr=50.0) == 20   # capped at 20
 
     def test_high_atr_gives_fewer_lots(self):
         sizer = self._sizer()

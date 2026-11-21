@@ -85,28 +85,27 @@ def compute_ema(df: pd.DataFrame, length: int = 200) -> pd.DataFrame:
 
 def compute_atr(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
     """
-    Compute ATR as EMA of True Range.
+    Compute ATR as EMA of True Range using standard (raw) OHLC candles.
 
     PineScript: atr = ema(tr(true), atrperiod)
 
-    tr(true) uses previous close in the True Range:
+    True Range uses standard (raw) prices:
       TR = max(high - low, abs(high - prev_close), abs(low - prev_close))
 
-    Note: uses ha_high/ha_low but regular close for prev_close term
-    (HA candles already smooth, but TR still uses raw prev_close convention).
-    We use ha_high/ha_low for the HA-based range.
+    Standard candle prices reflect the actual traded market volatility and are used
+    for risk/stop distance and position sizing calculations.
     """
-    ha_high  = df["ha_high"]
-    ha_low   = df["ha_low"]
-    ha_close = df["ha_close"]
-    prev_close = ha_close.shift(1)
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
 
     tr = pd.concat([
-        ha_high - ha_low,
-        (ha_high - prev_close).abs(),
-        (ha_low  - prev_close).abs(),
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
     ], axis=1).max(axis=1)
 
-    # EMA of TR (matches PineScript ema())
+    # EMA of True Range (matches PineScript ema(tr(true), atrperiod))
     df["atr"] = tr.ewm(span=period, adjust=False).mean()
     return df

@@ -45,6 +45,8 @@ def _load_yaml_settings(yaml_path: str = SETTINGS_YML_PATH) -> dict:
     parsed["base_risk_pct"]      = float(trade.get("base_risk_pct", 2.0))
     parsed["lot_multiplier"]     = int(trade.get("lot_multiplier", 1))
     parsed["trade_mode"]         = str(trade.get("mode", "Both")).strip()
+    max_l = trade.get("max_lots")
+    parsed["max_lots"]           = int(max_l) if max_l is not None else None
 
     ind = doc.get("indicators", {})
     parsed["enter_channel"]      = int(ind.get("enter_channel", 20))
@@ -125,6 +127,7 @@ class Settings(BaseSettings):
     base_risk_pct: float = 2.0
     lot_multiplier: int = 1
     trade_mode: str = "Both"
+    max_lots: int | None = None
 
     # Indicators
     enter_channel: int = 20
@@ -161,24 +164,24 @@ class Settings(BaseSettings):
              defined in mcx-comm's own .env.
         """
         yaml_settings = _load_yaml_settings(yaml_path)
-        instance = cls(**yaml_settings)
 
-        # Inherit credentials from nifty-strike-engine .env if missing
-        if instance.nse_env_path:
-            creds = _read_credentials_from_nse_env(instance.nse_env_path)
-            overrides = {}
-            if not instance.kite_api_key and "kite_api_key" in creds:
-                overrides["kite_api_key"] = creds["kite_api_key"]
-            if not instance.kite_api_secret and "kite_api_secret" in creds:
-                overrides["kite_api_secret"] = creds["kite_api_secret"]
-            if not instance.kite_access_token and "kite_access_token" in creds:
-                overrides["kite_access_token"] = creds["kite_access_token"]
+        # Pre-check for NSE_ENV_PATH in environment or default
+        from dotenv import dotenv_values
+        local_env = dotenv_values(".env")
+        nse_path = local_env.get("NSE_ENV_PATH", "D:/Workspace/nifty-strike-engine/.env")
 
-            if overrides:
-                merged = {**yaml_settings, **instance.model_dump(), **overrides}
-                instance = cls(**merged)
+        nse_creds = _read_credentials_from_nse_env(nse_path) if nse_path else {}
 
-        return instance
+        # Merge order: yaml_settings < nse_creds < local_env
+        merged = {**yaml_settings}
+        for k in ("kite_api_key", "kite_api_secret", "kite_access_token"):
+            if k in nse_creds and nse_creds[k]:
+                merged[k] = nse_creds[k]
+        for k, v in local_env.items():
+            if v:
+                merged[k.lower()] = v
+
+        return cls(**merged)
 
     @field_validator("discord_webhook_url")
     @classmethod

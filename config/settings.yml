@@ -13,6 +13,7 @@ trade:
   base_risk_pct: 2.0        # Risk per trade as % of capital
   lot_multiplier: 1         # Units per lot — GOLDPETAL = 1 gram/lot
   mode: "Both"              # Long | Short | Both
+  max_lots: null            # Optional cap (null = uncapped / risk-formula driven)
 
 indicators:
   enter_channel: 20         # Donchian enter channel period (highest high lookback)

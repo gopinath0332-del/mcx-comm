@@ -167,8 +167,12 @@ class ContractSelector:
 
         future_contracts.sort(key=lambda x: x[0])
 
-        # Pick the nearest future (soonest expiry after today)
-        _, selected = future_contracts[0]
+        # Next-month future rule:
+        # future_contracts[0] is the current near-month contract (e.g. NOV).
+        # future_contracts[1] is the NEXT month contract (e.g. DEC, GOLDPETAL26DECFUT).
+        # When 2 or more contracts exist, select index 1 (next month).
+        target_idx = 1 if len(future_contracts) > 1 else 0
+        _, selected = future_contracts[target_idx]
         symbol = selected["tradingsymbol"]
         token = int(selected["instrument_token"])
         return symbol, token
