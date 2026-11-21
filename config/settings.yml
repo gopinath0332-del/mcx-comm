@@ -1,0 +1,44 @@
+# ============================================================
+# mcx-comm — Strategy Configuration
+# Single source of truth for all non-secret parameters.
+# Secrets (API keys, tokens, webhook URL) → .env
+# ============================================================
+
+strategy:
+  name: "GoldTrendFilter"
+  instrument_prefix: "MCX:GOLDPETAL"   # base symbol prefix for contract lookup
+
+trade:
+  capital: 200000           # Fixed capital in INR (₹2,00,000)
+  base_risk_pct: 2.0        # Risk per trade as % of capital
+  lot_multiplier: 1         # Units per lot — GOLDPETAL = 1 gram/lot
+  mode: "Both"              # Long | Short | Both
+
+indicators:
+  enter_channel: 20         # Donchian enter channel period (highest high lookback)
+  exit_channel: 10          # Donchian exit channel period (lowest low lookback)
+  ema_length: 200           # EMA period for trend filter
+  atr_period: 20            # ATR period (EMA of True Range)
+  atr_tp_multiplier: 4.0    # ATR multiplier for Take Profit level
+  atr_trail_multiplier: 2.0 # ATR multiplier for Trailing Stop Loss
+  enable_partial_tp: false  # Partial TP disabled per user settings
+  min_long_days: 0          # Minimum days long held before short entry allowed (0 = disabled)
+
+skip_opening_candles:
+  enabled: true             # Skip first N candles of each MCX session
+  bars_to_skip: 2           # Skip first 2 candles (09:00 and 10:00 on 1H)
+
+timing:
+  candle_interval_minutes: 60  # 1 Hour candles
+  market_open: "09:00"
+  market_close: "23:30"
+  entry_cutoff: "22:00"        # Stop new entries at 22:00 IST
+  eod_exit: "23:25"            # Force-close all positions at 23:25 IST
+  enforce_market_hours: true
+  warmup_candles: 150          # ~6 trading days of 1H history for indicator warm-up
+
+sizing:
+  use_atr_sizing: true      # ATR-based lot sizing from image.png formula
+
+logging:
+  level: "INFO"

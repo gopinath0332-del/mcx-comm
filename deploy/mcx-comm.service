@@ -1,0 +1,17 @@
+[Unit]
+Description=MCX Gold Commodity Trading Engine
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/mcx-comm
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/mcx-comm/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
