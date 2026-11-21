@@ -75,24 +75,27 @@ def _load_yaml_settings(yaml_path: str = SETTINGS_YML_PATH) -> dict:
     return parsed
 
 
-def _read_token_from_nse_env(nse_env_path: str) -> str | None:
+def _read_credentials_from_nse_env(nse_env_path: str) -> dict[str, str]:
     """
-    Read KITE_ACCESS_TOKEN from the nifty-strike-engine .env file.
-    Returns the token string, or None if the file / key is not found.
+    Read Kite credentials (KITE_API_KEY, KITE_API_SECRET, KITE_ACCESS_TOKEN)
+    directly from nifty-strike-engine's .env file.
     """
+    creds: dict[str, str] = {}
     if not nse_env_path or not os.path.exists(nse_env_path):
-        return None
+        return creds
     try:
         with open(nse_env_path, "r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
-                if line.startswith("KITE_ACCESS_TOKEN="):
-                    token = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if token:
-                        return token
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k in ("KITE_API_KEY", "KITE_API_SECRET", "KITE_ACCESS_TOKEN"):
+                        creds[k.lower()] = v
     except Exception:
         pass
-    return None
+    return creds
 
 
 class Settings(BaseSettings):
@@ -107,12 +110,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ---- Secrets (.env) -------------------------------------------
-    kite_api_key: str
-    kite_api_secret: str = ""
-    kite_access_token: str = ""    # resolved below — from NSE .env if not set here
-    discord_webhook_url: str
+    # ---- Secrets & Paths (.env) -----------------------------------
     nse_env_path: str = "D:/Workspace/nifty-strike-engine/.env"
+    kite_api_key: str = ""
+    kite_api_secret: str = ""
+    kite_access_token: str = ""
+    discord_webhook_url: str
     live_order_placement: bool = False
 
     # ---- Strategy (settings.yml) -----------------------------------
@@ -152,29 +155,30 @@ class Settings(BaseSettings):
     @classmethod
     def load(cls, yaml_path: str = SETTINGS_YML_PATH) -> "Settings":
         """
-        Load settings: merge .env credentials with config/settings.yml parameters.
-        Resolves access token from nifty-strike-engine .env if not set locally.
+        Load settings:
+          1. Parse settings.yml for strategy parameters.
+          2. Auto-load kite credentials from NSE_ENV_PATH if not explicitly
+             defined in mcx-comm's own .env.
         """
         yaml_settings = _load_yaml_settings(yaml_path)
         instance = cls(**yaml_settings)
 
-        # Resolve access token: local .env wins; fall back to nifty-strike-engine .env
-        if not instance.kite_access_token and instance.nse_env_path:
-            token = _read_token_from_nse_env(instance.nse_env_path)
-            if token:
-                # Rebuild with token resolved
-                instance = cls(**{**yaml_settings, "kite_access_token": token})
+        # Inherit credentials from nifty-strike-engine .env if missing
+        if instance.nse_env_path:
+            creds = _read_credentials_from_nse_env(instance.nse_env_path)
+            overrides = {}
+            if not instance.kite_api_key and "kite_api_key" in creds:
+                overrides["kite_api_key"] = creds["kite_api_key"]
+            if not instance.kite_api_secret and "kite_api_secret" in creds:
+                overrides["kite_api_secret"] = creds["kite_api_secret"]
+            if not instance.kite_access_token and "kite_access_token" in creds:
+                overrides["kite_access_token"] = creds["kite_access_token"]
+
+            if overrides:
+                merged = {**yaml_settings, **instance.model_dump(), **overrides}
+                instance = cls(**merged)
 
         return instance
-
-    @field_validator("kite_api_key")
-    @classmethod
-    def api_key_must_not_be_placeholder(cls, v: str) -> str:
-        if v.strip() in {"your_api_key_here", ""}:
-            raise ValueError(
-                "KITE_API_KEY has a placeholder/empty value. Set it in .env"
-            )
-        return v.strip()
 
     @field_validator("discord_webhook_url")
     @classmethod
@@ -196,12 +200,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def resolve_access_token(self) -> "Settings":
-        """Warn loudly if no access token was resolved."""
-        if not self.kite_access_token:
-            import warnings
+        """Warn loudly if no API key or access token was resolved."""
+        import warnings
+        if not self.kite_api_key:
             warnings.warn(
-                "KITE_ACCESS_TOKEN is not set. Set it in .env or ensure "
-                f"nifty-strike-engine .env exists at {self.nse_env_path}",
+                "KITE_API_KEY is not set. Ensure nifty-strike-engine .env exists at "
+                f"{self.nse_env_path} or define it in .env",
+                stacklevel=2,
+            )
+        if not self.kite_access_token:
+            warnings.warn(
+                "KITE_ACCESS_TOKEN is not set. Ensure nifty-strike-engine .env exists at "
+                f"{self.nse_env_path} or define it in .env",
                 stacklevel=2,
             )
         return self
