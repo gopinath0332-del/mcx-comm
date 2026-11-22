@@ -15,7 +15,7 @@ MCX GOLDPETAL futures symbol format on Kite:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 try:
     import zoneinfo
@@ -62,6 +62,7 @@ class ContractSelector:
         self,
         kite,
         open_position_symbol: str | None = None,
+        tender_cutoff_days: int = 8,
     ) -> tuple[str, int]:
         """
         Determine the contract to trade or track.
@@ -74,6 +75,8 @@ class ContractSelector:
             Symbol of a currently open position (from StateManager), if any.
             When provided, that contract is returned directly (without selection logic),
             so exit signals are tracked on the correct expiry month.
+        tender_cutoff_days : int
+            Safety threshold in days (tender period + buffer) to avoid picking near-expiry contracts.
 
         Returns
         -------
@@ -89,14 +92,38 @@ class ContractSelector:
             )
             return open_position_symbol, token
 
-        # Rule 2: Select next-month contract
+        # Rule 2: Select next-month contract safely beyond tender period
         instruments = self._fetch_goldpetal_instruments(kite)
-        symbol, token = self._select_next_month(instruments)
+        symbol, token = self._select_next_month(instruments, tender_cutoff_days=tender_cutoff_days)
         logger.info(
-            "No open position: selected next-month contract %s (token=%d)",
+            "No open position: selected safe next-month contract %s (token=%d)",
             symbol, token,
         )
         return symbol, token
+
+    def get_contract_expiry(self, kite, symbol: str) -> date | None:
+        """
+        Look up the expiry date for a given trading symbol.
+        Returns a date object or None if not found.
+        """
+        try:
+            instruments = self._fetch_goldpetal_instruments(kite)
+            for inst in instruments:
+                if inst.get("tradingsymbol", "").upper() == symbol.upper():
+                    expiry = inst.get("expiry")
+                    if isinstance(expiry, str):
+                        return datetime.strptime(expiry, "%Y-%m-%d").date()
+                    elif hasattr(expiry, "date"):
+                        return expiry.date()
+                    elif isinstance(expiry, date):
+                        return expiry
+        except Exception as exc:
+            logger.warning("Could not resolve expiry for symbol %s: %s", symbol, exc)
+        return None
+
+    def clear_cache(self) -> None:
+        """Clear cached instruments so the next selection fetches fresh data from Kite."""
+        self._instruments_cache = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -131,17 +158,19 @@ class ContractSelector:
         logger.debug("Found %d GOLDPETAL futures contracts.", len(futures))
         return futures
 
-    def _select_next_month(self, instruments: list[dict]) -> tuple[str, int]:
+    def _select_next_month(
+        self,
+        instruments: list[dict],
+        tender_cutoff_days: int = 8,
+    ) -> tuple[str, int]:
         """
-        Select the nearest-expiry future whose expiry is AFTER today.
-        This is the "next month" contract to trade fresh entries in.
-
-        On expiry day itself, the next contract (the one after the expiring one)
-        is selected to avoid trading into expiry.
+        Select the nearest-expiry future whose expiry is safely beyond the tender period.
+        Excludes contracts within tender_cutoff_days (tender period + safety buffer, e.g. 8 days).
         """
         today = datetime.now(tz=IST).date()
+        cutoff_date = today + timedelta(days=tender_cutoff_days)
 
-        # Collect futures with expiry > today, sort ascending by expiry
+        # Collect futures with expiry > cutoff_date (safe from tender delivery)
         future_contracts = []
         for inst in instruments:
             expiry = inst.get("expiry")
@@ -156,8 +185,25 @@ class ContractSelector:
             elif hasattr(expiry, "date"):
                 expiry = expiry.date()
 
-            if expiry > today:
+            if expiry > cutoff_date:
                 future_contracts.append((expiry, inst))
+
+        if not future_contracts:
+            logger.warning(
+                "No contracts found with expiry after %s (cutoff=%dd). Falling back to expiry > today.",
+                cutoff_date, tender_cutoff_days,
+            )
+            for inst in instruments:
+                expiry = inst.get("expiry")
+                if isinstance(expiry, str):
+                    try:
+                        expiry = datetime.strptime(expiry, "%Y-%m-%d").date()
+                    except ValueError:
+                        continue
+                elif hasattr(expiry, "date"):
+                    expiry = expiry.date()
+                if expiry and expiry > today:
+                    future_contracts.append((expiry, inst))
 
         if not future_contracts:
             raise RuntimeError(
@@ -167,12 +213,8 @@ class ContractSelector:
 
         future_contracts.sort(key=lambda x: x[0])
 
-        # Next-month future rule:
-        # future_contracts[0] is the current near-month contract (e.g. NOV).
-        # future_contracts[1] is the NEXT month contract (e.g. DEC, GOLDPETAL26DECFUT).
-        # When 2 or more contracts exist, select index 1 (next month).
-        target_idx = 1 if len(future_contracts) > 1 else 0
-        _, selected = future_contracts[target_idx]
+        # Nearest contract safely outside tender period
+        _, selected = future_contracts[0]
         symbol = selected["tradingsymbol"]
         token = int(selected["instrument_token"])
         return symbol, token

@@ -233,3 +233,73 @@ def test_fetch_current_ltp(dummy_settings, mock_kite, mock_notifier):
     ltp = sm._fetch_current_ltp()
     assert ltp == 8560.5
     assert sm._last_ltp == 8560.5
+
+
+def test_expiry_tender_guard_triggers_exit_and_rollover_on_open_position(
+    dummy_settings, mock_kite, mock_notifier
+):
+    from datetime import date
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26NOVFUT"
+    sm._active_expiry = date(2026, 11, 28)
+
+    # Simulate open position in NOV contract
+    sm._order_mgr.restore_state(
+        symbol="GOLDPETAL26NOVFUT", qty=1, position="LONG", entry_price=8500.0
+    )
+    sm._signal_engine.restore_state("LONG")
+
+    # Today is Nov 22 -> 6 days to expiry (<= cutoff 8 days)
+    now_ist = datetime(2026, 11, 22, 15, 0, tzinfo=IST)
+
+    with patch.object(sm._contract_selector, "get_contract_expiry", return_value=date(2026, 11, 28)), \
+         patch.object(sm, "_fetch_current_ltp", return_value=8550.0), \
+         patch.object(sm, "_rollover_active_contract") as mock_rollover, \
+         patch.object(sm._order_mgr, "handle_exit") as mock_exit:
+
+        triggered = sm._check_expiry_tender_guard(now_ist)
+        assert triggered is True
+        mock_exit.assert_called_once()
+        exit_arg = mock_exit.call_args[0][0]
+        assert "Tender Expiry Guard" in exit_arg.exit_reason
+        mock_rollover.assert_called_once()
+
+
+def test_expiry_tender_guard_triggers_rollover_without_position(
+    dummy_settings, mock_kite, mock_notifier
+):
+    from datetime import date
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26NOVFUT"
+    sm._active_expiry = date(2026, 11, 28)
+    sm._order_mgr._symbol = None  # No open position
+
+    # Today is Nov 22 -> 6 days to expiry (<= cutoff 8 days)
+    now_ist = datetime(2026, 11, 22, 15, 0, tzinfo=IST)
+
+    with patch.object(sm, "_rollover_active_contract") as mock_rollover:
+        triggered = sm._check_expiry_tender_guard(now_ist)
+        assert triggered is True
+        mock_rollover.assert_called_once()
+
+
+def test_expiry_tender_guard_no_trigger_outside_cutoff(
+    dummy_settings, mock_kite, mock_notifier
+):
+    from datetime import date
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    sm._active_expiry = date(2026, 12, 31)
+    sm._order_mgr.restore_state(
+        symbol="GOLDPETAL26DECFUT", qty=1, position="LONG", entry_price=8500.0
+    )
+
+    # Today is Nov 22 -> 39 days to expiry (> cutoff 8 days)
+    now_ist = datetime(2026, 11, 22, 15, 0, tzinfo=IST)
+
+    with patch.object(sm._contract_selector, "get_contract_expiry", return_value=date(2026, 12, 31)), \
+         patch.object(sm, "_rollover_active_contract") as mock_rollover:
+
+        triggered = sm._check_expiry_tender_guard(now_ist)
+        assert triggered is False
+        mock_rollover.assert_not_called()

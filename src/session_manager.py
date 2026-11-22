@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from collections import deque
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import pandas as pd
@@ -124,6 +124,7 @@ class SessionManager:
         )
         self._active_symbol: str = ""
         self._active_token: int  = 0
+        self._active_expiry: date | None = None
 
         # Candle buffer & state tracking
         self._candle_buffer: deque[dict] = deque(maxlen=500)
@@ -146,13 +147,22 @@ class SessionManager:
         logger.info("MCX Gold Engine starting in %s mode (REST Polling).", mode)
         self._running = True
 
-        # 1. Select contract (respects open position rule)
+        # 1. Select contract (respects open position rule & tender guard)
         open_sym = self._state_mgr.load()
         open_sym_str = open_sym.symbol if open_sym else None
         self._active_symbol, self._active_token = (
-            self._contract_selector.get_active_contract(self._kite, open_sym_str)
+            self._contract_selector.get_active_contract(
+                self._kite, open_sym_str, tender_cutoff_days=self._s.tender_cutoff_days
+            )
         )
-        logger.info("Active contract: %s (token=%d)", self._active_symbol, self._active_token)
+        self._active_expiry = self._contract_selector.get_contract_expiry(
+            self._kite, self._active_symbol
+        )
+        logger.info(
+            "Active contract: %s (token=%d, expiry=%s)",
+            self._active_symbol, self._active_token,
+            self._active_expiry.strftime("%Y-%m-%d") if self._active_expiry else "N/A",
+        )
 
         # 2. Reconcile state with broker
         self._state_mgr.reconcile(
@@ -229,7 +239,11 @@ class SessionManager:
                 now_ist = datetime.now(tz=IST)
                 now_t = now_ist.time()
 
-                # 1. EOD force-exit
+                # 1. Tender Expiry Guard Check
+                if self._check_expiry_tender_guard(now_ist):
+                    continue
+
+                # 2. EOD force-exit
                 if now_t >= eod_target and self._order_mgr.open_symbol is not None:
                     logger.warning(
                         "🚨 [EOD WATCHDOG] Time %s ≥ %s with open position %s. Force exiting.",
@@ -248,13 +262,13 @@ class SessionManager:
                         reason="EOD Watchdog", candle_time=now_ist, atr=0.0
                     )
 
-                # 2. Market close check
+                # 3. Market close check
                 if self._s.enforce_market_hours and now_t >= close_target:
                     logger.info("MCX Market close (%s IST). Sending EOD summary.", self._s.market_close)
                     self._send_eod_summary(now_ist)
                     break
 
-                # 3. New Candle evaluation (REST poll)
+                # 4. New Candle evaluation (REST poll)
                 if self._is_time_for_candle_check(now_ist):
                     self._check_and_process_new_candles()
 
@@ -545,6 +559,107 @@ class SessionManager:
         except Exception as exc:
             logger.warning("Could not pre-seed historical candles: %s", exc)
             return 0
+
+    # ------------------------------------------------------------------
+    # Tender / Expiry Guard & Contract Rollover
+    # ------------------------------------------------------------------
+
+    def _check_expiry_tender_guard(self, now_ist: datetime) -> bool:
+        """
+        Check if the open position or active tracking contract has entered the MCX
+        tender cutoff window (typically 5 trading days tender period + 3 days buffer).
+        If an open position is within the cutoff, force-exit it immediately and rollover.
+        If no position is open but active contract is within the cutoff, rollover the contract.
+        Returns True if a rollover action was performed, False otherwise.
+        """
+        if not self._s.expiry_guard_enabled:
+            return False
+
+        today = now_ist.date()
+        cutoff_days = self._s.tender_cutoff_days
+
+        # Case 1: Open position within tender period
+        open_sym = self._order_mgr.open_symbol
+        if open_sym is not None:
+            expiry = self._contract_selector.get_contract_expiry(self._kite, open_sym)
+            if expiry:
+                days_left = (expiry - today).days
+                if days_left <= cutoff_days:
+                    logger.warning(
+                        "🚨 [EXPIRY TENDER GUARD] Open position %s expires on %s (%d days <= %d days cutoff). "
+                        "Triggering force-exit to prevent physical delivery / penalty margin.",
+                        open_sym, expiry, days_left, cutoff_days,
+                    )
+                    exit_price = self._fetch_current_ltp()
+                    result = SignalResult(
+                        action="EXIT_BUY" if self._signal_engine.position == "LONG" else "EXIT_SELL",
+                        exit_reason=f"Tender Expiry Guard ({days_left}d to expiry ≤ {cutoff_days}d)",
+                        candle_time=now_ist,
+                        atr=0.0,
+                    )
+                    self._order_mgr.handle_exit(result, now_ist, exit_price=exit_price)
+                    self._signal_engine.force_exit(
+                        reason=f"Tender Expiry Guard ({days_left}d to expiry)",
+                        candle_time=now_ist,
+                        atr=0.0,
+                    )
+                    self._notifier.warning(
+                        f"🚨 **MCX Tender Guard Triggered**: Force exited `{open_sym}` at ₹{exit_price:,.2f} "
+                        f"({days_left} days left to expiry, threshold: {cutoff_days} days). Rolling over contract."
+                    )
+                    self._rollover_active_contract()
+                    return True
+
+        # Case 2: Active tracking contract within tender period (no open position)
+        if self._active_expiry is not None:
+            days_left = (self._active_expiry - today).days
+            if days_left <= cutoff_days:
+                logger.warning(
+                    "⚠️ [EXPIRY TENDER GUARD] Active contract %s expires on %s (%d days <= %d days cutoff). "
+                    "Rolling over active tracking contract to next safe month.",
+                    self._active_symbol, self._active_expiry, days_left, cutoff_days,
+                )
+                self._notifier.info(
+                    f"🔄 **MCX Tender Guard**: Active contract `{self._active_symbol}` is within "
+                    f"tender window ({days_left}d to expiry ≤ {cutoff_days}d). Rolling over to next safe month."
+                )
+                self._rollover_active_contract()
+                return True
+
+        return False
+
+    def _rollover_active_contract(self) -> None:
+        """
+        Rollover the active contract to the next safe month outside the tender period.
+        Clears contract cache, selects new contract, updates token/expiry, and pre-seeds candles.
+        """
+        logger.info("Initiating contract rollover...")
+        old_symbol = self._active_symbol
+        self._contract_selector.clear_cache()
+        new_symbol, new_token = self._contract_selector.get_active_contract(
+            self._kite,
+            open_position_symbol=None,
+            tender_cutoff_days=self._s.tender_cutoff_days,
+        )
+        new_expiry = self._contract_selector.get_contract_expiry(self._kite, new_symbol)
+
+        self._active_symbol = new_symbol
+        self._active_token = new_token
+        self._active_expiry = new_expiry
+
+        logger.info(
+            "Rollover complete: %s -> %s (token=%d, expiry=%s)",
+            old_symbol, new_symbol, new_token,
+            new_expiry.strftime("%Y-%m-%d") if new_expiry else "N/A",
+        )
+        self._notifier.info(
+            f"🔄 **Contract Rollover Complete**: Now tracking `{new_symbol}` "
+            f"(Expiry: {new_expiry.strftime('%Y-%m-%d') if new_expiry else 'N/A'})."
+        )
+        # Clear candle buffer and re-seed historical 1H candles for new contract
+        self._candle_buffer.clear()
+        self._last_processed_candle_time = None
+        self._preseed_historical_candles()
 
     # ------------------------------------------------------------------
     # Notifications & Standby

@@ -38,6 +38,11 @@ timing:
   enforce_market_hours: true
   warmup_candles: 150          # ~6 trading days of 1H history for indicator warm-up
 
+expiry_guard:
+  enabled: true
+  tender_period_days: 5        # MCX physical delivery tender period (5 trading days before expiry)
+  tender_buffer_days: 3        # Safety buffer before tender period begins (total 8 days before expiry)
+
 sizing:
   use_atr_sizing: true      # ATR-based lot sizing from image.png formula
 

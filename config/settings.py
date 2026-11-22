@@ -71,6 +71,11 @@ def _load_yaml_settings(yaml_path: str = SETTINGS_YML_PATH) -> dict:
     parsed["enforce_market_hours"] = bool(timing.get("enforce_market_hours", True))
     parsed["warmup_candles"]      = int(timing.get("warmup_candles", 150))
 
+    expiry = doc.get("expiry_guard", {})
+    parsed["expiry_guard_enabled"] = bool(expiry.get("enabled", True))
+    parsed["tender_period_days"]   = int(expiry.get("tender_period_days", 5))
+    parsed["tender_buffer_days"]   = int(expiry.get("tender_buffer_days", 3))
+
     logging_elem = doc.get("logging", {})
     parsed["log_level"] = str(logging_elem.get("level", "INFO")).strip().upper()
 
@@ -151,6 +156,16 @@ class Settings(BaseSettings):
     eod_exit: str = "23:25"
     enforce_market_hours: bool = True
     warmup_candles: int = 150
+
+    # Expiry & Tender Period Guard
+    expiry_guard_enabled: bool = True
+    tender_period_days: int = 5
+    tender_buffer_days: int = 3
+
+    @property
+    def tender_cutoff_days(self) -> int:
+        """Total days before expiry to exit/rollover (tender period + safety buffer)."""
+        return self.tender_period_days + self.tender_buffer_days
 
     # Logging
     log_level: str = "INFO"
