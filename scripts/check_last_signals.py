@@ -138,9 +138,9 @@ def main():
         print(f"  Current Position: {engine.position or 'FLAT'}")
         return
 
-    # Print the last 5 signals
-    print("--- Recent Signals ---")
-    for s in signals[-5:]:
+    # Print all signals
+    print("--- All Signals (Chronological) ---")
+    for s in signals:
         time_str = s['time'].strftime('%Y-%m-%d %H:%M IST')
         if s['action'] in ('BUY', 'SELL'):
             trail_str = f"Trail SL: ₹{s['trail_sl']:.2f}" if s['trail_sl'] else ""

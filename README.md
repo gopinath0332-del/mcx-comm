@@ -41,7 +41,7 @@ Automated live trading engine for MCX Gold Futures (starting with **GOLDPETAL**)
    * Active market hours: 09:00 to 23:30 IST.
    * Entry cutoff: 22:00 IST.
    * EOD Force Exit: 23:25 IST.
-   * Stalled WebSocket auto-recovery (>90s watchdog).
+   * Lightweight hourly REST polling (no WebSocket connection overhead or stall issues).
 
 ---
 

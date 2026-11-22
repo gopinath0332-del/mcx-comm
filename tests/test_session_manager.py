@@ -1,0 +1,235 @@
+"""
+tests/test_session_manager.py
+==============================
+Unit tests for SessionManager REST-based polling, market hour checks,
+candle time verification, and historical pre-seeding.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, time, timedelta
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+try:
+    import zoneinfo
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+except Exception:
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+
+from config.settings import Settings
+from src.session_manager import (
+    SessionManager,
+    _is_market_hours,
+    _is_weekend,
+)
+
+
+@pytest.fixture
+def dummy_settings():
+    """Return Settings instance with mock parameters."""
+    with patch("config.settings._load_yaml_settings") as mock_yaml:
+        mock_yaml.return_value = {
+            "strategy_name": "GoldTrendFilter",
+            "instrument_prefix": "MCX:GOLDPETAL",
+            "capital": 200000.0,
+            "base_risk_pct": 2.0,
+            "lot_multiplier": 1,
+            "trade_mode": "Both",
+            "max_lots": None,
+            "enter_channel": 20,
+            "exit_channel": 10,
+            "ema_length": 200,
+            "atr_period": 20,
+            "atr_tp_multiplier": 4.0,
+            "atr_trail_multiplier": 2.0,
+            "enable_partial_tp": False,
+            "min_long_days": 0,
+            "skip_opening_enabled": True,
+            "bars_to_skip": 2,
+            "candle_interval_minutes": 60,
+            "market_open": "09:00",
+            "market_close": "23:30",
+            "entry_cutoff": "22:00",
+            "eod_exit": "23:25",
+            "enforce_market_hours": True,
+            "warmup_candles": 50,
+            "use_atr_sizing": True,
+            "log_level": "INFO",
+        }
+        with patch.dict(
+            "os.environ",
+            {
+                "KITE_API_KEY": "test_api_key",
+                "KITE_ACCESS_TOKEN": "test_access_token",
+                "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/test",
+                "LIVE_ORDER_PLACEMENT": "false",
+            },
+        ):
+            settings = Settings()
+            return settings
+
+
+@pytest.fixture
+def mock_kite():
+    kite = MagicMock()
+    kite.margins.return_value = {
+        "available": {"live_balance": 200000.0, "cash": 200000.0}
+    }
+    kite.ltp.return_value = {
+        "MCX:GOLDPETAL26DECFUT": {"last_price": 8550.0}
+    }
+    return kite
+
+
+@pytest.fixture
+def mock_notifier():
+    return MagicMock()
+
+
+# ----------------------------------------------------------------------
+# 1. Market Hours and Weekend Helpers
+# ----------------------------------------------------------------------
+
+def test_is_weekend():
+    # 2026-11-21 is Saturday, 2026-11-22 is Sunday
+    sat = datetime(2026, 11, 21, 10, 0, tzinfo=IST)
+    sun = datetime(2026, 11, 22, 10, 0, tzinfo=IST)
+    mon = datetime(2026, 11, 23, 10, 0, tzinfo=IST)
+    assert _is_weekend(sat) is True
+    assert _is_weekend(sun) is True
+    assert _is_weekend(mon) is False
+
+
+def test_is_market_hours():
+    open_t = (9, 0)
+    close_t = (23, 30)
+
+    # Monday 08:59 (closed)
+    dt1 = datetime(2026, 11, 23, 8, 59, tzinfo=IST)
+    assert _is_market_hours(dt1, open_t, close_t) is False
+
+    # Monday 09:00 (open)
+    dt2 = datetime(2026, 11, 23, 9, 0, tzinfo=IST)
+    assert _is_market_hours(dt2, open_t, close_t) is True
+
+    # Monday 15:30 (open)
+    dt3 = datetime(2026, 11, 23, 15, 30, tzinfo=IST)
+    assert _is_market_hours(dt3, open_t, close_t) is True
+
+    # Monday 23:30 (open)
+    dt4 = datetime(2026, 11, 23, 23, 30, tzinfo=IST)
+    assert _is_market_hours(dt4, open_t, close_t) is True
+
+    # Monday 23:31 (closed)
+    dt5 = datetime(2026, 11, 23, 23, 31, tzinfo=IST)
+    assert _is_market_hours(dt5, open_t, close_t) is False
+
+    # Saturday 12:00 (closed)
+    dt6 = datetime(2026, 11, 21, 12, 0, tzinfo=IST)
+    assert _is_market_hours(dt6, open_t, close_t) is False
+
+
+# ----------------------------------------------------------------------
+# 2. Candle Timing Checks (_is_time_for_candle_check)
+# ----------------------------------------------------------------------
+
+def test_is_time_for_candle_check(dummy_settings, mock_kite, mock_notifier):
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    sm._active_token = 12345
+
+    # 1. Before 10:00:00 (first candle 09:00-10:00 not closed yet)
+    now_0930 = datetime(2026, 11, 23, 9, 30, 0, tzinfo=IST)
+    assert sm._is_time_for_candle_check(now_0930) is False
+
+    # 2. At 10:00:06 (first candle is closed + 5s grace period)
+    now_1000 = datetime(2026, 11, 23, 10, 0, 6, tzinfo=IST)
+    assert sm._is_time_for_candle_check(now_1000) is True
+
+    # 3. If last processed candle was 09:00 (closed at 10:00),
+    # next candle closes at 11:00:00. At 10:15:00 it should return False.
+    sm._last_processed_candle_time = datetime(2026, 11, 23, 9, 0, 0, tzinfo=IST)
+    now_1015 = datetime(2026, 11, 23, 10, 15, 0, tzinfo=IST)
+    assert sm._is_time_for_candle_check(now_1015) is False
+
+    # 4. At 11:00:06, next candle (10:00-11:00) is closed
+    now_1100 = datetime(2026, 11, 23, 11, 0, 6, tzinfo=IST)
+    assert sm._is_time_for_candle_check(now_1100) is True
+
+
+# ----------------------------------------------------------------------
+# 3. Preseed and New Candle Processing
+# ----------------------------------------------------------------------
+
+def test_preseed_historical_candles_filters_in_progress(dummy_settings, mock_kite, mock_notifier):
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    sm._active_token = 12345
+
+    # Mock historical_data returning 3 candles:
+    # 08:00 (closed), 09:00 (closed), and 10:00 (in-progress at 10:30)
+    ref_time = datetime(2026, 11, 23, 10, 30, 0, tzinfo=IST)
+    candles = [
+        {"date": datetime(2026, 11, 23, 8, 0, tzinfo=IST), "open": 8500, "high": 8520, "low": 8490, "close": 8510, "volume": 100},
+        {"date": datetime(2026, 11, 23, 9, 0, tzinfo=IST), "open": 8510, "high": 8530, "low": 8505, "close": 8525, "volume": 120},
+        {"date": datetime(2026, 11, 23, 10, 0, tzinfo=IST), "open": 8525, "high": 8540, "low": 8520, "close": 8535, "volume": 50},
+    ]
+    mock_kite.historical_data.return_value = candles
+
+    with patch("src.session_manager.datetime") as mock_dt:
+        mock_dt.now.return_value = ref_time
+        mock_dt.combine = datetime.combine
+        mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+
+        loaded = sm._preseed_historical_candles()
+        # Only 08:00 and 09:00 are closed at 10:30 (10:00 closes at 11:00)
+        assert loaded == 2
+        assert len(sm._candle_buffer) == 2
+        assert sm._last_processed_candle_time == datetime(2026, 11, 23, 9, 0, tzinfo=IST)
+        assert sm._last_ltp == 8525.0
+
+
+def test_check_and_process_new_candles(dummy_settings, mock_kite, mock_notifier):
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    sm._active_token = 12345
+
+    # Suppose 09:00 candle was already processed
+    sm._last_processed_candle_time = datetime(2026, 11, 23, 9, 0, tzinfo=IST)
+
+    # Now at 11:00:10, 10:00 candle is closed, and 11:00 candle is in progress
+    now_time = datetime(2026, 11, 23, 11, 0, 10, tzinfo=IST)
+    candles = [
+        {"date": datetime(2026, 11, 23, 9, 0, tzinfo=IST), "open": 8500, "high": 8520, "low": 8490, "close": 8510, "volume": 100},
+        {"date": datetime(2026, 11, 23, 10, 0, tzinfo=IST), "open": 8510, "high": 8540, "low": 8500, "close": 8530, "volume": 150},
+        {"date": datetime(2026, 11, 23, 11, 0, tzinfo=IST), "open": 8530, "high": 8535, "low": 8528, "close": 8532, "volume": 20},
+    ]
+    mock_kite.historical_data.return_value = candles
+
+    with patch.object(sm, "_process_closed_candle") as mock_process:
+        with patch("src.session_manager.datetime") as mock_dt:
+            mock_dt.now.return_value = now_time
+            mock_dt.combine = datetime.combine
+
+            processed = sm._check_and_process_new_candles()
+            assert processed == 1
+            assert sm._last_processed_candle_time == datetime(2026, 11, 23, 10, 0, tzinfo=IST)
+            assert sm._last_ltp == 8530.0
+            mock_process.assert_called_once()
+            cand_arg = mock_process.call_args[0][0]
+            assert cand_arg["open"] == 8510.0
+            assert cand_arg["close"] == 8530.0
+
+
+def test_fetch_current_ltp(dummy_settings, mock_kite, mock_notifier):
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    mock_kite.ltp.return_value = {
+        "MCX:GOLDPETAL26DECFUT": {"last_price": 8560.5}
+    }
+    ltp = sm._fetch_current_ltp()
+    assert ltp == 8560.5
+    assert sm._last_ltp == 8560.5
