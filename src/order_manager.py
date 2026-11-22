@@ -18,6 +18,8 @@ MCX Futures use:
 from __future__ import annotations
 
 import logging
+import math
+import time as _time
 from datetime import datetime
 from typing import Any
 
@@ -146,20 +148,35 @@ class OrderManager:
             transaction_type=KiteConnect.TRANSACTION_TYPE_BUY,
             qty=final_lots,
         )
+        if order_id == "FAILED":
+            return
+
+        # 3. Poll order history for actual execution price (slippage tracking)
+        fill_price, status = self._fetch_executed_price(
+            order_id=order_id,
+            fallback_price=entry_price,
+        )
+        if status.startswith("REJECTED") or status.startswith("CANCELLED") or fill_price <= 0:
+            logger.error("BUY order %s rejected/cancelled on exchange: %s", order_id, status)
+            self._notifier.error(f"❌ BUY Order {order_id} ({symbol}) was {status}")
+            return
+
+        slippage = fill_price - entry_price
+        slippage_str = f" | Slippage: ₹{slippage:+.2f} ({(slippage/entry_price)*100:+.2f}%)" if entry_price > 0 and self._s.live_order_placement else ""
 
         self._symbol           = symbol
         self._instrument_token = instrument_token
         self._position         = "LONG"
         self._qty              = final_lots
-        self._entry_price      = entry_price
+        self._entry_price      = fill_price
 
-        # Persist state
+        # Persist state with real execution price
         from src.state_manager import PositionState
         self._state.save(PositionState(
             position="LONG",
             symbol=symbol,
             instrument_token=instrument_token,
-            entry_price=entry_price,
+            entry_price=fill_price,
             qty=final_lots,
             long_trail=signal_result.trail_sl,
             short_trail=None,
@@ -169,23 +186,23 @@ class OrderManager:
         # Notify Discord
         self._notifier.buy_entry(
             symbol=symbol,
-            entry_price=entry_price,
+            entry_price=fill_price,
             qty=final_lots,
             atr=atr,
             trail_sl=signal_result.trail_sl,
             candle_time=candle_time,
-            sizing_desc=sizing_desc,
+            sizing_desc=f"{sizing_desc}{slippage_str}",
             order_id=order_id,
             live=self._s.live_order_placement,
         )
         logger.info(
-            "BUY ORDER: %s qty=%d entry=%.2f trail=%.2f order_id=%s live=%s",
-            symbol, final_lots, entry_price,
+            "BUY ORDER: %s qty=%d fill=%.2f (signal=%.2f) trail=%.2f order_id=%s live=%s",
+            symbol, final_lots, fill_price, entry_price,
             signal_result.trail_sl or 0, order_id, self._s.live_order_placement,
         )
         trade_logger.info(
-            "🟢 BUY ENTRY | %s | Qty: %d | Entry: ₹%.2f | Trail SL: ₹%.2f | ATR: ₹%.2f | Order ID: %s | Mode: %s",
-            symbol, final_lots, entry_price,
+            "🟢 BUY ENTRY | %s | Qty: %d | Fill Price: ₹%.2f (Signal: ₹%.2f) | Trail SL: ₹%.2f | ATR: ₹%.2f | Order ID: %s | Mode: %s",
+            symbol, final_lots, fill_price, entry_price,
             signal_result.trail_sl or 0, atr, order_id, "LIVE" if self._s.live_order_placement else "PAPER",
         )
 
@@ -220,19 +237,34 @@ class OrderManager:
             transaction_type=KiteConnect.TRANSACTION_TYPE_SELL,
             qty=final_lots,
         )
+        if order_id == "FAILED":
+            return
+
+        # 3. Poll order history for actual execution price (slippage tracking)
+        fill_price, status = self._fetch_executed_price(
+            order_id=order_id,
+            fallback_price=entry_price,
+        )
+        if status.startswith("REJECTED") or status.startswith("CANCELLED") or fill_price <= 0:
+            logger.error("SELL order %s rejected/cancelled on exchange: %s", order_id, status)
+            self._notifier.error(f"❌ SELL Order {order_id} ({symbol}) was {status}")
+            return
+
+        slippage = entry_price - fill_price
+        slippage_str = f" | Slippage: ₹{slippage:+.2f} ({(slippage/entry_price)*100:+.2f}%)" if entry_price > 0 and self._s.live_order_placement else ""
 
         self._symbol           = symbol
         self._instrument_token = instrument_token
         self._position         = "SHORT"
         self._qty              = final_lots
-        self._entry_price      = entry_price
+        self._entry_price      = fill_price
 
         from src.state_manager import PositionState
         self._state.save(PositionState(
             position="SHORT",
             symbol=symbol,
             instrument_token=instrument_token,
-            entry_price=entry_price,
+            entry_price=fill_price,
             qty=final_lots,
             long_trail=None,
             short_trail=signal_result.trail_sl,
@@ -241,23 +273,23 @@ class OrderManager:
 
         self._notifier.sell_entry(
             symbol=symbol,
-            entry_price=entry_price,
+            entry_price=fill_price,
             qty=final_lots,
             atr=atr,
             trail_sl=signal_result.trail_sl,
             candle_time=candle_time,
-            sizing_desc=sizing_desc,
+            sizing_desc=f"{sizing_desc}{slippage_str}",
             order_id=order_id,
             live=self._s.live_order_placement,
         )
         logger.info(
-            "SELL ORDER: %s qty=%d entry=%.2f trail=%.2f order_id=%s live=%s",
-            symbol, final_lots, entry_price,
+            "SELL ORDER: %s qty=%d fill=%.2f (signal=%.2f) trail=%.2f order_id=%s live=%s",
+            symbol, final_lots, fill_price, entry_price,
             signal_result.trail_sl or 0, order_id, self._s.live_order_placement,
         )
         trade_logger.info(
-            "🔴 SELL ENTRY | %s | Qty: %d | Entry: ₹%.2f | Trail SL: ₹%.2f | ATR: ₹%.2f | Order ID: %s | Mode: %s",
-            symbol, final_lots, entry_price,
+            "🔴 SELL ENTRY | %s | Qty: %d | Fill Price: ₹%.2f (Signal: ₹%.2f) | Trail SL: ₹%.2f | ATR: ₹%.2f | Order ID: %s | Mode: %s",
+            symbol, final_lots, fill_price, entry_price,
             signal_result.trail_sl or 0, atr, order_id, "LIVE" if self._s.live_order_placement else "PAPER",
         )
 
@@ -287,31 +319,38 @@ class OrderManager:
             qty=self._qty,
         )
 
-        pnl_est = self._estimate_pnl(exit_price, is_long)
+        # Poll real exit fill price
+        real_exit_price, status = self._fetch_executed_price(
+            order_id=order_id,
+            fallback_price=exit_price,
+        )
+
+        # 100% accurate realized P&L based on real exchange execution prices!
+        realized_pnl = self._estimate_pnl(real_exit_price, is_long)
 
         self._notifier.exit_trade(
             symbol=self._symbol,
             position=self._position,
-            exit_price=exit_price,
+            exit_price=real_exit_price,
             entry_price=self._entry_price,
             qty=self._qty,
             reason=signal_result.exit_reason,
-            pnl_est=pnl_est,
+            pnl_est=realized_pnl,
             candle_time=candle_time,
             order_id=order_id,
             live=self._s.live_order_placement,
         )
         logger.info(
-            "EXIT ORDER: %s %s qty=%d exit=%.2f entry=%.2f pnl_est=%.2f reason=%s",
+            "EXIT ORDER: %s %s qty=%d exit=%.2f entry=%.2f pnl=%.2f reason=%s",
             "EXIT_BUY" if is_long else "EXIT_SELL",
-            self._symbol, self._qty, exit_price, self._entry_price,
-            pnl_est, signal_result.exit_reason,
+            self._symbol, self._qty, real_exit_price, self._entry_price,
+            realized_pnl, signal_result.exit_reason,
         )
         trade_logger.info(
-            "🛑 %s | %s | Qty: %d | Exit: ₹%.2f | Entry: ₹%.2f | Est. P&L: ₹%+.2f | Reason: %s | Order ID: %s",
+            "🛑 %s | %s | Qty: %d | Exit Price: ₹%.2f | Entry Price: ₹%.2f | Realized P&L: ₹%+.2f | Reason: %s | Order ID: %s",
             "EXIT_BUY" if is_long else "EXIT_SELL",
-            self._symbol, self._qty, exit_price, self._entry_price,
-            pnl_est, signal_result.exit_reason, order_id,
+            self._symbol, self._qty, real_exit_price, self._entry_price,
+            realized_pnl, signal_result.exit_reason, order_id,
         )
 
         # Clear state
@@ -365,6 +404,66 @@ class OrderManager:
                 f"Error: {exc}"
             )
             return "FAILED"
+
+    def _fetch_executed_price(
+        self,
+        order_id: str,
+        fallback_price: float,
+        max_retries: int = 4,
+        delay_seconds: float = 0.5,
+    ) -> tuple[float, str]:
+        """
+        Poll kite.order_history(order_id) to capture the exact executed average price.
+
+        Parameters
+        ----------
+        order_id : str
+            Order ID returned by place_order().
+        fallback_price : float
+            Default price if polling times out or simulation mode.
+        max_retries : int
+            Number of polling attempts (default: 4).
+        delay_seconds : float
+            Interval between polling attempts (default: 0.5s).
+
+        Returns
+        -------
+        (fill_price, status) : tuple[float, str]
+        """
+        if not self._s.live_order_placement or order_id.startswith("SIM-") or order_id == "FAILED":
+            return fallback_price, "COMPLETE"
+
+        for attempt in range(max_retries):
+            try:
+                history = self._kite.order_history(order_id)
+                if history and isinstance(history, list):
+                    latest = history[-1]
+                    status = str(latest.get("status", "")).upper()
+
+                    if status == "COMPLETE":
+                        avg_price = float(latest.get("average_price", 0.0))
+                        if avg_price > 0:
+                            logger.info(
+                                "Order %s executed on exchange @ ₹%.2f (attempt %d)",
+                                order_id, avg_price, attempt + 1,
+                            )
+                            return avg_price, "COMPLETE"
+
+                    elif status in ("REJECTED", "CANCELLED"):
+                        reason = latest.get("status_message") or status
+                        logger.error("Order %s was %s: %s", order_id, status, reason)
+                        return 0.0, f"{status}: {reason}"
+
+            except Exception as exc:
+                logger.warning("Error fetching order history for %s: %s", order_id, exc)
+
+            _time.sleep(delay_seconds)
+
+        logger.warning(
+            "Order %s did not reach COMPLETE within timeout; using fallback price ₹%.2f",
+            order_id, fallback_price,
+        )
+        return fallback_price, "PENDING"
 
     def _estimate_pnl(self, exit_price: float, is_long: bool) -> float:
         """

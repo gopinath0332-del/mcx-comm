@@ -150,13 +150,14 @@ class DiscordNotifier:
         color   = _COLOR["exit_win"] if pnl_est >= 0 else _COLOR["exit_loss"]
         emoji   = "✅" if pnl_est >= 0 else "🔴"
         label   = "EXIT BUY" if position == "LONG" else "EXIT SELL"
+        pnl_label = "Realized P&L" if live else "Est. P&L"
         fields  = [
             ("Contract",    symbol,              True),
             ("Exit Price",  f"₹{exit_price:.2f}" if exit_price > 0 else "Market", True),
             ("Entry Price", f"₹{entry_price:.2f}", True),
             ("Qty (Lots)",  str(qty),            True),
             ("Reason",      reason,              False),
-            ("Est. P&L",    pnl_str,             True),
+            (pnl_label,     pnl_str,             True),
             ("Candle Time", candle_time.strftime("%d %b %Y %H:%M IST"), False),
             ("Order ID",    order_id,            False),
         ]

@@ -194,3 +194,83 @@ def test_handle_buy_respects_margin_cap(order_manager):
     assert order_manager.open_position == "LONG"
     # Should be capped at 20 lots instead of 53
     assert order_manager.open_qty == 20
+
+
+def test_fetch_executed_price_simulation(order_manager):
+    order_manager._s.live_order_placement = False
+    price, status = order_manager._fetch_executed_price("SIM-1234", fallback_price=12400.0)
+    assert price == 12400.0
+    assert status == "COMPLETE"
+
+
+def test_fetch_executed_price_live_success(order_manager):
+    order_manager._s.live_order_placement = True
+    order_manager._kite.order_history.return_value = [
+        {"order_id": "261122001", "status": "OPEN", "average_price": 0.0},
+        {"order_id": "261122001", "status": "COMPLETE", "average_price": 12415.50},
+    ]
+    price, status = order_manager._fetch_executed_price("261122001", fallback_price=12400.0)
+    assert price == 12415.50
+    assert status == "COMPLETE"
+
+
+def test_fetch_executed_price_live_rejected(order_manager):
+    order_manager._s.live_order_placement = True
+    order_manager._kite.order_history.return_value = [
+        {"order_id": "261122002", "status": "REJECTED", "status_message": "RMS: Margin Insufficient", "average_price": 0.0},
+    ]
+    price, status = order_manager._fetch_executed_price("261122002", fallback_price=12400.0)
+    assert price == 0.0
+    assert "REJECTED" in status
+
+
+def test_handle_buy_live_captures_real_fill_and_slippage(order_manager):
+    order_manager._s.live_order_placement = True
+    order_manager._kite.place_order.return_value = "261122003"
+    order_manager._kite.margins.return_value = {
+        "available": {"live_balance": 100000.0, "cash": 100000.0}
+    }
+    order_manager._kite.order_margins.return_value = [{"total": 1500.0}]
+    # Signal says 12500, but real fill was 12504 (₹4 slippage)
+    order_manager._kite.order_history.return_value = [
+        {"order_id": "261122003", "status": "COMPLETE", "average_price": 12504.0},
+    ]
+
+    now_ist = datetime(2026, 11, 23, 11, 0, tzinfo=IST)
+    sig = SignalResult(
+        action="BUY",
+        entry_price=12500.0,
+        trail_sl=12300.0,
+        atr=50.0,
+        candle_time=now_ist,
+    )
+
+    order_manager.handle_buy("GOLDPETAL26DECFUT", 12345, sig, now_ist)
+    assert order_manager.open_position == "LONG"
+    # Exact real fill price saved to state
+    assert order_manager._entry_price == 12504.0
+    saved_state = order_manager._state.load()
+    assert saved_state.entry_price == 12504.0
+
+
+def test_handle_exit_live_captures_real_fill_and_exact_pnl(order_manager):
+    order_manager._s.live_order_placement = True
+    # Restore position: LONG @ 12504.0, qty=10
+    order_manager.restore_state("GOLDPETAL26DECFUT", qty=10, position="LONG", entry_price=12504.0)
+    order_manager._kite.place_order.return_value = "261122004"
+    # Real exit fill was 12600.0 (gain of ₹96/g x 10 = ₹960.00)
+    order_manager._kite.order_history.return_value = [
+        {"order_id": "261122004", "status": "COMPLETE", "average_price": 12600.0},
+    ]
+
+    now_ist = datetime(2026, 11, 23, 15, 0, tzinfo=IST)
+    sig = SignalResult(action="EXIT_BUY", exit_reason="Trailing SL Hit", candle_time=now_ist)
+
+    order_manager.handle_exit(sig, now_ist, exit_price=12590.0)
+    assert order_manager.open_position is None
+
+    # Check notification call: exit_price was 12600.0 and realized PnL was 960.0
+    notifier_args = order_manager._notifier.exit_trade.call_args[1]
+    assert notifier_args["exit_price"] == 12600.0
+    assert notifier_args["pnl_est"] == 960.0
+
