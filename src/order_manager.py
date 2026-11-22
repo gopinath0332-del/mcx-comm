@@ -122,22 +122,36 @@ class OrderManager:
         signal_result,
         candle_time: datetime,
     ) -> None:
-        """Place a LONG entry order."""
+        """Place a LONG entry order with margin pre-flight check."""
         atr = signal_result.atr
-        qty = self._sizer.calculate(atr)
-        sizing_desc = self._sizer.describe(atr)
+        entry_price = signal_result.entry_price
+
+        # 1. Calculate risk-driven lots
+        risk_lots = self._sizer.calculate(atr)
+
+        # 2. Pre-flight margin verification: Final Lots = min(Risk Lots, Affordable Margin Lots)
+        final_lots, sizing_desc = self._apply_margin_preflight(
+            symbol=symbol,
+            transaction_type=KiteConnect.TRANSACTION_TYPE_BUY,
+            risk_lots=risk_lots,
+            entry_price=entry_price,
+            atr=atr,
+        )
+        if final_lots <= 0:
+            logger.warning("BUY order aborted: 0 affordable lots based on available margin.")
+            return
 
         order_id = self._place_order(
             symbol=symbol,
             transaction_type=KiteConnect.TRANSACTION_TYPE_BUY,
-            qty=qty,
+            qty=final_lots,
         )
 
         self._symbol           = symbol
         self._instrument_token = instrument_token
         self._position         = "LONG"
-        self._qty              = qty
-        self._entry_price      = signal_result.entry_price
+        self._qty              = final_lots
+        self._entry_price      = entry_price
 
         # Persist state
         from src.state_manager import PositionState
@@ -145,8 +159,8 @@ class OrderManager:
             position="LONG",
             symbol=symbol,
             instrument_token=instrument_token,
-            entry_price=signal_result.entry_price,
-            qty=qty,
+            entry_price=entry_price,
+            qty=final_lots,
             long_trail=signal_result.trail_sl,
             short_trail=None,
             entry_timestamp=candle_time.isoformat(),
@@ -155,8 +169,8 @@ class OrderManager:
         # Notify Discord
         self._notifier.buy_entry(
             symbol=symbol,
-            entry_price=signal_result.entry_price,
-            qty=qty,
+            entry_price=entry_price,
+            qty=final_lots,
             atr=atr,
             trail_sl=signal_result.trail_sl,
             candle_time=candle_time,
@@ -166,12 +180,12 @@ class OrderManager:
         )
         logger.info(
             "BUY ORDER: %s qty=%d entry=%.2f trail=%.2f order_id=%s live=%s",
-            symbol, qty, signal_result.entry_price,
+            symbol, final_lots, entry_price,
             signal_result.trail_sl or 0, order_id, self._s.live_order_placement,
         )
         trade_logger.info(
             "🟢 BUY ENTRY | %s | Qty: %d | Entry: ₹%.2f | Trail SL: ₹%.2f | ATR: ₹%.2f | Order ID: %s | Mode: %s",
-            symbol, qty, signal_result.entry_price,
+            symbol, final_lots, entry_price,
             signal_result.trail_sl or 0, atr, order_id, "LIVE" if self._s.live_order_placement else "PAPER",
         )
 
@@ -182,30 +196,44 @@ class OrderManager:
         signal_result,
         candle_time: datetime,
     ) -> None:
-        """Place a SHORT entry order."""
+        """Place a SHORT entry order with margin pre-flight check."""
         atr = signal_result.atr
-        qty = self._sizer.calculate(atr)
-        sizing_desc = self._sizer.describe(atr)
+        entry_price = signal_result.entry_price
+
+        # 1. Calculate risk-driven lots
+        risk_lots = self._sizer.calculate(atr)
+
+        # 2. Pre-flight margin verification: Final Lots = min(Risk Lots, Affordable Margin Lots)
+        final_lots, sizing_desc = self._apply_margin_preflight(
+            symbol=symbol,
+            transaction_type=KiteConnect.TRANSACTION_TYPE_SELL,
+            risk_lots=risk_lots,
+            entry_price=entry_price,
+            atr=atr,
+        )
+        if final_lots <= 0:
+            logger.warning("SELL order aborted: 0 affordable lots based on available margin.")
+            return
 
         order_id = self._place_order(
             symbol=symbol,
             transaction_type=KiteConnect.TRANSACTION_TYPE_SELL,
-            qty=qty,
+            qty=final_lots,
         )
 
         self._symbol           = symbol
         self._instrument_token = instrument_token
         self._position         = "SHORT"
-        self._qty              = qty
-        self._entry_price      = signal_result.entry_price
+        self._qty              = final_lots
+        self._entry_price      = entry_price
 
         from src.state_manager import PositionState
         self._state.save(PositionState(
             position="SHORT",
             symbol=symbol,
             instrument_token=instrument_token,
-            entry_price=signal_result.entry_price,
-            qty=qty,
+            entry_price=entry_price,
+            qty=final_lots,
             long_trail=None,
             short_trail=signal_result.trail_sl,
             entry_timestamp=candle_time.isoformat(),
@@ -213,8 +241,8 @@ class OrderManager:
 
         self._notifier.sell_entry(
             symbol=symbol,
-            entry_price=signal_result.entry_price,
-            qty=qty,
+            entry_price=entry_price,
+            qty=final_lots,
             atr=atr,
             trail_sl=signal_result.trail_sl,
             candle_time=candle_time,
@@ -224,12 +252,12 @@ class OrderManager:
         )
         logger.info(
             "SELL ORDER: %s qty=%d entry=%.2f trail=%.2f order_id=%s live=%s",
-            symbol, qty, signal_result.entry_price,
+            symbol, final_lots, entry_price,
             signal_result.trail_sl or 0, order_id, self._s.live_order_placement,
         )
         trade_logger.info(
             "🔴 SELL ENTRY | %s | Qty: %d | Entry: ₹%.2f | Trail SL: ₹%.2f | ATR: ₹%.2f | Order ID: %s | Mode: %s",
-            symbol, qty, signal_result.entry_price,
+            symbol, final_lots, entry_price,
             signal_result.trail_sl or 0, atr, order_id, "LIVE" if self._s.live_order_placement else "PAPER",
         )
 
@@ -349,3 +377,113 @@ class OrderManager:
         if not is_long:
             diff = -diff
         return round(diff * self._qty * self._s.lot_multiplier, 2)
+
+    # ------------------------------------------------------------------
+    # Margin Pre-Flight Verification
+    # ------------------------------------------------------------------
+
+    def _get_available_margin(self) -> float:
+        """
+        Fetch available cash balance from Kite.
+        Checks commodity segment first; falls back to equity if commodity is 0 (unified account).
+        """
+        if not self._kite:
+            return 0.0
+        try:
+            m = self._kite.margins(segment="commodity")
+            avail = m.get("available", {})
+            live_bal = float(avail.get("live_balance") or avail.get("cash") or 0.0)
+            if live_bal > 0:
+                return live_bal
+
+            all_m = self._kite.margins()
+            eq_avail = all_m.get("equity", {}).get("available", {})
+            eq_bal = float(eq_avail.get("live_balance") or eq_avail.get("cash") or 0.0)
+            if eq_bal > 0:
+                return eq_bal
+            return 0.0
+        except Exception as exc:
+            logger.warning("Failed to fetch margins from Kite: %s", exc)
+            return 0.0
+
+    def _estimate_margin_per_lot(
+        self,
+        symbol: str,
+        transaction_type: str,
+        entry_price: float,
+    ) -> float:
+        """
+        Estimate margin required for 1 lot of the given contract.
+        Uses Kite order_margins if available; falls back to exchange margin rate (~12%).
+        """
+        try:
+            params = [{
+                "exchange": self.EXCHANGE,
+                "tradingsymbol": symbol,
+                "transaction_type": transaction_type,
+                "variety": KiteConnect.VARIETY_REGULAR,
+                "product": self.PRODUCT,
+                "order_type": self.ORDER_TYPE,
+                "quantity": 1,
+            }]
+            margins = self._kite.order_margins(params)
+            if margins and isinstance(margins, list):
+                total = float(margins[0].get("total", 0.0))
+                if total > 0:
+                    return total
+        except Exception as exc:
+            logger.debug("kite.order_margins query failed or returned 0: %s", exc)
+
+        # Fallback heuristic: MCX Gold initial margin is ~12% of contract value
+        lot_multiplier = self._sizer.lot_multiplier or 1
+        price = entry_price if entry_price > 0 else 12500.0
+        contract_value = price * lot_multiplier
+        return contract_value * 0.12
+
+    def _apply_margin_preflight(
+        self,
+        symbol: str,
+        transaction_type: str,
+        risk_lots: int,
+        entry_price: float,
+        atr: float,
+    ) -> tuple[int, str]:
+        """
+        Query broker margins before order placement.
+        Enforces: Final Lots = min(Risk Lots, Affordable Margin Lots)
+        """
+        avail_cash = self._get_available_margin()
+
+        # In simulation mode, if broker cash is 0, fall back to configured capital
+        if not self._s.live_order_placement and avail_cash <= 0:
+            avail_cash = self._s.capital
+
+        margin_per_lot = self._estimate_margin_per_lot(symbol, transaction_type, entry_price)
+        final_lots = self._sizer.cap_by_margin(risk_lots, avail_cash, margin_per_lot)
+
+        base_desc = self._sizer.describe(atr)
+
+        if final_lots <= 0:
+            msg = (
+                f"🚨 **Margin Pre-Flight Rejection**: Available cash ₹{avail_cash:,.2f} is insufficient "
+                f"for 1 lot of {symbol} (est. ₹{margin_per_lot:,.2f}/lot required). "
+                f"Order was aborted to prevent broker rejection."
+            )
+            logger.error(msg)
+            self._notifier.error(msg)
+            return 0, f"{base_desc} | ⚠️ Aborted: Insufficient margin (Avail: ₹{avail_cash:,.0f})"
+
+        if final_lots < risk_lots:
+            sizing_desc = (
+                f"{base_desc}\n"
+                f"⚠️ *Margin Capped:* Risk called for {risk_lots} lots, but available cash ₹{avail_cash:,.0f} "
+                f"(₹{margin_per_lot:,.0f}/lot) capped position to **{final_lots} lot(s)**."
+            )
+            logger.warning(
+                "Margin cap applied for %s: Risk lots=%d capped to %d lots (Avail cash: ₹%.2f, Margin/lot: ₹%.2f)",
+                symbol, risk_lots, final_lots, avail_cash, margin_per_lot,
+            )
+        else:
+            sizing_desc = f"{base_desc} (Margin Verified: ₹{avail_cash:,.0f} available)"
+
+        return final_lots, sizing_desc

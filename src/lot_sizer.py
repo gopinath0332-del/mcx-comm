@@ -106,6 +106,30 @@ class LotSizer:
         )
         return lots
 
+    def cap_by_margin(
+        self,
+        risk_lots: int,
+        available_margin: float,
+        margin_per_lot: float,
+    ) -> int:
+        """
+        Cap risk_lots to affordable lots based on available broker margin.
+
+        Formula:
+          affordable_lots = floor(available_margin / margin_per_lot)
+          final_lots      = min(risk_lots, affordable_lots)
+
+        Returns 0 if available margin cannot cover even 1 lot.
+        """
+        if margin_per_lot <= 0:
+            return risk_lots
+        if available_margin <= 0:
+            return 0
+        affordable_lots = math.floor(available_margin / margin_per_lot)
+        if affordable_lots <= 0:
+            return 0
+        return min(risk_lots, affordable_lots)
+
     def describe(self, atr: float) -> str:
         """Human-readable sizing breakdown for Discord messages."""
         lots = self.calculate(atr)

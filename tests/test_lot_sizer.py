@@ -74,3 +74,21 @@ class TestLotSizer:
         desc = sizer.describe(atr=100.0)
         assert isinstance(desc, str)
         assert "lot" in desc.lower()
+
+    def test_cap_by_margin(self):
+        sizer = self._sizer()
+        # Risk lots = 50, Available margin = 30000, margin per lot = 1500
+        # affordable = 30000 / 1500 = 20 lots -> min(50, 20) = 20
+        assert sizer.cap_by_margin(risk_lots=50, available_margin=30000.0, margin_per_lot=1500.0) == 20
+
+        # Available margin plenty (100,000 / 1500 = 66) -> min(50, 66) = 50
+        assert sizer.cap_by_margin(risk_lots=50, available_margin=100000.0, margin_per_lot=1500.0) == 50
+
+        # Zero available margin -> 0 lots
+        assert sizer.cap_by_margin(risk_lots=50, available_margin=0.0, margin_per_lot=1500.0) == 0
+
+        # Margin less than 1 lot -> 0 lots
+        assert sizer.cap_by_margin(risk_lots=50, available_margin=1000.0, margin_per_lot=1500.0) == 0
+
+        # Non-positive margin_per_lot -> returns risk_lots
+        assert sizer.cap_by_margin(risk_lots=50, available_margin=1000.0, margin_per_lot=0.0) == 50
