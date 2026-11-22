@@ -222,6 +222,14 @@ class DiscordNotifier:
             mode=self._live,
         )
 
+    def warning(self, message: str) -> None:
+        self._send_embed(
+            title="⚠️ MCX Engine Warning",
+            color=_COLOR["warn"],
+            fields=[("Warning", message, False)],
+            mode=self._live,
+        )
+
     def info(self, message: str) -> None:
         self._send_embed(
             title="ℹ️ MCX Engine",

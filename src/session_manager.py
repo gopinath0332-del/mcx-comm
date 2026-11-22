@@ -147,6 +147,11 @@ class SessionManager:
         logger.info("MCX Gold Engine starting in %s mode (REST Polling).", mode)
         self._running = True
 
+        # 0. Ensure authenticated Kite connection (handles token expiry on startup gracefully)
+        self._ensure_authenticated_kite()
+        if not self._running:
+            return
+
         # 1. Select contract (respects open position rule & tender guard)
         open_sym = self._state_mgr.load()
         open_sym_str = open_sym.symbol if open_sym else None
@@ -212,6 +217,75 @@ class SessionManager:
         self._running = False
         self._notifier.info("⏹️ MCX Gold Engine stopped.")
         self._notifier.stop()
+
+    # ------------------------------------------------------------------
+    # Startup Token Validation & Morning Refresh Guard
+    # ------------------------------------------------------------------
+
+    def _ensure_authenticated_kite(self, retry_delay: int = 60) -> None:
+        """
+        Validate Kite Connect authentication on startup.
+        If token validation fails (e.g. expired overnight before morning auth runs),
+        sends a Discord alert:
+            "⚠️ Zerodha token expired. Waiting for morning refresh..."
+        and sleeps/retries every 60 seconds until the token is updated in .env.
+        """
+        from kiteconnect.exceptions import TokenException
+
+        alert_sent = False
+
+        while self._running:
+            try:
+                # 1. Reload the latest token from disk (.env / NSE_ENV_PATH)
+                token = self._reload_access_token()
+                if not token:
+                    raise TokenException("Kite access token is empty or missing from .env")
+
+                # Apply token to kite client
+                if hasattr(self._kite, "set_access_token"):
+                    self._kite.set_access_token(token)
+
+                # 2. Validate token against Zerodha API
+                profile = self._kite.profile()
+                user_name = profile.get("user_name", "Trader") if hasattr(profile, "get") else "Trader"
+                user_id = profile.get("user_id", "") if hasattr(profile, "get") else ""
+                logger.info(
+                    "Zerodha Kite authenticated successfully for %s (%s).",
+                    user_name, user_id,
+                )
+                if alert_sent:
+                    self._notifier.info(
+                        f"✅ **Zerodha Token Refreshed**: Authenticated as {user_name} ({user_id}). Resuming engine startup."
+                    )
+                return
+
+            except TokenException as exc:
+                logger.warning(
+                    "Zerodha token validation failed (TokenException: %s).", exc
+                )
+            except Exception as exc:
+                err_msg = str(exc).lower()
+                if "token" in err_msg or "session" in err_msg or "403" in err_msg or "forbidden" in err_msg:
+                    logger.warning("Zerodha token validation failed: %s.", exc)
+                else:
+                    logger.warning("Error checking Zerodha token on startup: %s.", exc)
+
+            if not alert_sent:
+                logger.warning("Sending Discord notification: token expired, waiting for morning refresh...")
+                self._notifier.warning("⚠️ Zerodha token expired. Waiting for morning refresh...")
+                alert_sent = True
+
+            logger.info("Waiting %ds for morning token refresh in .env...", retry_delay)
+            for _ in range(retry_delay):
+                if not self._running:
+                    return
+                _time.sleep(1)
+
+    def _reload_access_token(self) -> str:
+        """Reload latest Kite access token from disk (.env / NSE_ENV_PATH)."""
+        if hasattr(self._s, "reload_credentials"):
+            return self._s.reload_credentials()
+        return self._s.kite_access_token
 
     # ------------------------------------------------------------------
     # Active Session (REST Polling)

@@ -269,6 +269,23 @@ class Settings(BaseSettings):
         bars_per_day = 24  # MCX trades ~15 hours but pine uses 24 bars/day for filtering
         return self.min_long_days * bars_per_day
 
+    def reload_credentials(self) -> str:
+        """
+        Re-read Kite credentials from NSE_ENV_PATH and local .env.
+        Updates self.kite_access_token and returns it.
+        """
+        nse_creds = _read_credentials_from_nse_env(self.nse_env_path)
+        new_token = nse_creds.get("kite_access_token", "")
+
+        # Also check local .env
+        local_env = _read_credentials_from_nse_env(".env")
+        if local_env.get("kite_access_token"):
+            new_token = local_env["kite_access_token"]
+
+        if new_token:
+            self.kite_access_token = new_token
+        return self.kite_access_token
+
 
 def get_settings(yaml_path: str = SETTINGS_YML_PATH) -> Settings:
     return Settings.load(yaml_path=yaml_path)

@@ -303,3 +303,68 @@ def test_expiry_tender_guard_no_trigger_outside_cutoff(
         triggered = sm._check_expiry_tender_guard(now_ist)
         assert triggered is False
         mock_rollover.assert_not_called()
+
+
+# ----------------------------------------------------------------------
+# 4. Token Expiry & Startup Retry Tests
+# ----------------------------------------------------------------------
+
+def test_ensure_authenticated_kite_success(dummy_settings, mock_kite, mock_notifier):
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._running = True
+    mock_kite.profile.return_value = {"user_id": "TQL221", "user_name": "Rajaramanathan"}
+
+    sm._ensure_authenticated_kite(retry_delay=1)
+    mock_notifier.warning.assert_not_called()
+
+
+def test_ensure_authenticated_kite_retries_on_token_exception(
+    dummy_settings, mock_kite, mock_notifier
+):
+    from kiteconnect.exceptions import TokenException
+
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._running = True
+
+    # 1st call fails with TokenException, 2nd call succeeds
+    mock_kite.profile.side_effect = [
+        TokenException("Token expired"),
+        {"user_id": "TQL221", "user_name": "Rajaramanathan"},
+    ]
+
+    with patch("time.sleep") as mock_sleep, \
+         patch.object(sm, "_reload_access_token", side_effect=["expired_token", "new_refreshed_token"]):
+
+        sm._ensure_authenticated_kite(retry_delay=1)
+
+        # Discord alert must have been sent
+        mock_notifier.warning.assert_called_once_with(
+            "⚠️ Zerodha token expired. Waiting for morning refresh..."
+        )
+        # Sleep was called during retry
+        assert mock_sleep.called
+        # Token was updated on the kite client
+        mock_kite.set_access_token.assert_called_with("new_refreshed_token")
+        # Success notification was delivered
+        assert mock_notifier.info.called
+
+
+def test_ensure_authenticated_kite_aborts_on_stop(
+    dummy_settings, mock_kite, mock_notifier
+):
+    from kiteconnect.exceptions import TokenException
+
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._running = True
+
+    def stop_during_sleep(*args, **kwargs):
+        sm._running = False
+
+    mock_kite.profile.side_effect = TokenException("Token expired")
+
+    with patch("time.sleep", side_effect=stop_during_sleep):
+        sm._ensure_authenticated_kite(retry_delay=60)
+        assert sm._running is False
+        mock_notifier.warning.assert_called_once_with(
+            "⚠️ Zerodha token expired. Waiting for morning refresh..."
+        )
