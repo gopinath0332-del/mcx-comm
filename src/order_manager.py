@@ -22,8 +22,10 @@ from datetime import datetime
 from typing import Any
 
 from kiteconnect import KiteConnect
+from src.logger import get_trade_logger
 
 logger = logging.getLogger(__name__)
+trade_logger = get_trade_logger()
 
 try:
     import zoneinfo
@@ -167,6 +169,11 @@ class OrderManager:
             symbol, qty, signal_result.entry_price,
             signal_result.trail_sl or 0, order_id, self._s.live_order_placement,
         )
+        trade_logger.info(
+            "🟢 BUY ENTRY | %s | Qty: %d | Entry: ₹%.2f | Trail SL: ₹%.2f | ATR: ₹%.2f | Order ID: %s | Mode: %s",
+            symbol, qty, signal_result.entry_price,
+            signal_result.trail_sl or 0, atr, order_id, "LIVE" if self._s.live_order_placement else "PAPER",
+        )
 
     def handle_sell(
         self,
@@ -220,6 +227,11 @@ class OrderManager:
             symbol, qty, signal_result.entry_price,
             signal_result.trail_sl or 0, order_id, self._s.live_order_placement,
         )
+        trade_logger.info(
+            "🔴 SELL ENTRY | %s | Qty: %d | Entry: ₹%.2f | Trail SL: ₹%.2f | ATR: ₹%.2f | Order ID: %s | Mode: %s",
+            symbol, qty, signal_result.entry_price,
+            signal_result.trail_sl or 0, atr, order_id, "LIVE" if self._s.live_order_placement else "PAPER",
+        )
 
     # ------------------------------------------------------------------
     # Exit handler
@@ -266,6 +278,12 @@ class OrderManager:
             "EXIT_BUY" if is_long else "EXIT_SELL",
             self._symbol, self._qty, exit_price, self._entry_price,
             pnl_est, signal_result.exit_reason,
+        )
+        trade_logger.info(
+            "🛑 %s | %s | Qty: %d | Exit: ₹%.2f | Entry: ₹%.2f | Est. P&L: ₹%+.2f | Reason: %s | Order ID: %s",
+            "EXIT_BUY" if is_long else "EXIT_SELL",
+            self._symbol, self._qty, exit_price, self._entry_price,
+            pnl_est, signal_result.exit_reason, order_id,
         )
 
         # Clear state

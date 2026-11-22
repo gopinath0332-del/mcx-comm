@@ -120,6 +120,34 @@ python main.py
 
 ---
 
+## Logging & Debugging
+
+The engine features a multi-destination logging architecture stored in `logs/` (with daily rotation and 30-day retention):
+
+* `logs/engine.log`: Complete runtime log (including `DEBUG` indicator values, candles, and signals).
+* `logs/trades.log`: Dedicated audit trail of all orders, entries, exits, and P&L.
+* `logs/error.log`: Focused log of warnings and exceptions for fast troubleshooting.
+
+### Log Viewer CLI (`scripts/view_logs.py`)
+
+Inspect logs in real-time or view filtered logs:
+
+```bash
+# View last 50 lines of main engine log
+python scripts/view_logs.py
+
+# Live-tail logs in real-time (like tail -f)
+python scripts/view_logs.py --follow
+
+# View only the trade ledger
+python scripts/view_logs.py --trades
+
+# View error and warning history
+python scripts/view_logs.py --errors
+```
+
+---
+
 ## Raspberry Pi Deployment
 
 1. Clone or sync this repository to `/home/pi/mcx-comm`.

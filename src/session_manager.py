@@ -433,11 +433,12 @@ class SessionManager:
                 logger.debug("Skipping candle %s — NaN in indicators.", ist_ts.strftime("%H:%M"))
                 return
 
-            logger.debug(
-                "Candle %s | HA_C=%.2f upper=%.2f lower=%.2f ema=%.2f atr=%.2f",
-                ist_ts.strftime("%H:%M"),
-                last["ha_close"], last["upper"], last["lower"],
+            logger.info(
+                "📊 Candle %s | HA_C=₹%.2f (Raw C=₹%.2f) | Upper=₹%.2f | Lower=₹%.2f | EMA(200)=₹%.2f | ATR=₹%.2f | Pos=%s",
+                ist_ts.strftime("%Y-%m-%d %H:%M"),
+                last["ha_close"], last["close"], last["upper"], last["lower"],
                 last["ema_trend"], last["atr"],
+                self._signal_engine.position or "FLAT",
             )
 
             # Evaluate signals
