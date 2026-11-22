@@ -368,3 +368,85 @@ def test_ensure_authenticated_kite_aborts_on_stop(
         mock_notifier.warning.assert_called_once_with(
             "⚠️ Zerodha token expired. Waiting for morning refresh..."
         )
+
+
+# ----------------------------------------------------------------------
+# 5. Daily Heartbeat / Health Ping & Uptime Tests
+# ----------------------------------------------------------------------
+
+def test_get_uptime_str(dummy_settings, mock_kite, mock_notifier):
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    now = datetime.now(tz=IST)
+
+    # 45 minutes
+    sm._start_time = now - timedelta(minutes=45)
+    assert sm._get_uptime_str() == "45m"
+
+    # 2 hours 15 minutes
+    sm._start_time = now - timedelta(hours=2, minutes=15)
+    assert sm._get_uptime_str() == "2h 15m"
+
+    # 3 days 5 hours 10 minutes
+    sm._start_time = now - timedelta(days=3, hours=5, minutes=10)
+    assert sm._get_uptime_str() == "3d 5h 10m"
+
+
+def test_send_heartbeat(dummy_settings, mock_kite, mock_notifier):
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    sm._last_ltp = 8550.0
+    sm._candles_today = 5
+
+    now_ist = datetime(2026, 11, 23, 14, 0, tzinfo=IST)
+    sm._send_heartbeat(now_ist)
+
+    mock_notifier.heartbeat.assert_called_once()
+    kwargs = mock_notifier.heartbeat.call_args[1]
+    assert kwargs["contract"] == "GOLDPETAL26DECFUT"
+    assert kwargs["candles_evaluated"] == 5
+    assert kwargs["position"] == "FLAT"
+    assert "Host:" in kwargs["system_info"]
+    assert sm._heartbeat_date == now_ist.date()
+
+    # Second call on same date should not re-send
+    mock_notifier.heartbeat.reset_mock()
+    sm._send_heartbeat(now_ist)
+    mock_notifier.heartbeat.assert_not_called()
+
+
+def test_morning_briefing_includes_uptime(dummy_settings, mock_kite, mock_notifier):
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+
+    sm._send_morning_briefing()
+    mock_notifier.morning_briefing.assert_called_once()
+    kwargs = mock_notifier.morning_briefing.call_args[1]
+    assert "uptime" in kwargs
+    assert "system_info" in kwargs
+    assert "Host:" in kwargs["system_info"]
+
+
+def test_discord_notifier_heartbeat_embed():
+    from src.discord_notifier import DiscordNotifier
+    notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test", live_order_placement=False)
+
+    with patch.object(notifier, "_send_embed") as mock_send_embed:
+        notifier.heartbeat(
+            contract="GOLDPETAL26DECFUT",
+            ltp=8550.0,
+            position="LONG",
+            uptime="1d 4h 10m",
+            candles_evaluated=6,
+            system_info="Host: raspberrypi • PID: 12345",
+        )
+        mock_send_embed.assert_called_once()
+        title = mock_send_embed.call_args[1]["title"]
+        fields = mock_send_embed.call_args[1]["fields"]
+        assert "Daily Heartbeat" in title
+        field_dict = {f[0]: f[1] for f in fields}
+        assert field_dict["Contract"] == "GOLDPETAL26DECFUT"
+        assert "8,550.00" in field_dict["LTP"]
+        assert "LONG" in field_dict["Position"]
+        assert field_dict["Engine Uptime"] == "1d 4h 10m"
+        assert "raspberrypi" in field_dict["System Info"]
+        assert "🟢 Healthy (Raspberry Pi)" in field_dict["Daemon Status"]

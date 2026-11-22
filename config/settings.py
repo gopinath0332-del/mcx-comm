@@ -76,6 +76,10 @@ def _load_yaml_settings(yaml_path: str = SETTINGS_YML_PATH) -> dict:
     parsed["tender_period_days"]   = int(expiry.get("tender_period_days", 5))
     parsed["tender_buffer_days"]   = int(expiry.get("tender_buffer_days", 3))
 
+    hb = doc.get("heartbeat", {})
+    parsed["heartbeat_enabled"] = bool(hb.get("enabled", True))
+    parsed["heartbeat_time"]    = str(hb.get("time", "14:00")).strip()
+
     logging_elem = doc.get("logging", {})
     parsed["log_level"] = str(logging_elem.get("level", "INFO")).strip().upper()
 
@@ -167,6 +171,15 @@ class Settings(BaseSettings):
         """Total days before expiry to exit/rollover (tender period + safety buffer)."""
         return self.tender_period_days + self.tender_buffer_days
 
+    # Heartbeat / Health Ping
+    heartbeat_enabled: bool = True
+    heartbeat_time: str = "14:00"
+
+    @property
+    def heartbeat_hhmm(self) -> tuple[int, int]:
+        h, m = self.heartbeat_time.split(":")
+        return int(h), int(m)
+
     # Logging
     log_level: str = "INFO"
 
@@ -210,7 +223,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_time_formats(self) -> "Settings":
         pattern = re.compile(r"^\d{2}:\d{2}$")
-        for field in ("market_open", "market_close", "entry_cutoff", "eod_exit"):
+        for field in ("market_open", "market_close", "entry_cutoff", "eod_exit", "heartbeat_time"):
             val = getattr(self, field)
             if not pattern.match(val):
                 raise ValueError(f"{field} must be HH:MM format, got '{val}'")

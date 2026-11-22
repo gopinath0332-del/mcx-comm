@@ -136,6 +136,8 @@ class SessionManager:
         self._candles_today: int         = 0
         self._session_date               = datetime.now(tz=IST).date()
         self._morning_briefing_date      = None
+        self._start_time: datetime       = datetime.now(tz=IST)
+        self._heartbeat_date: date | None = None
 
     # ------------------------------------------------------------------
     # Startup & Main Execution Loop
@@ -300,12 +302,14 @@ class SessionManager:
 
         eod_h, eod_m = self._s.eod_exit_hhmm
         close_h, close_m = self._s.market_close_hhmm
+        heartbeat_h, heartbeat_m = self._s.heartbeat_hhmm
         eod_target = time(eod_h, eod_m)
         close_target = time(close_h, close_m)
+        heartbeat_target = time(heartbeat_h, heartbeat_m)
 
         logger.info(
-            "MCX active polling loop started: EOD exit at %s IST | Market close at %s IST.",
-            self._s.eod_exit, self._s.market_close,
+            "MCX active polling loop started: EOD exit at %s IST | Market close at %s IST | Heartbeat at %s IST.",
+            self._s.eod_exit, self._s.market_close, self._s.heartbeat_time,
         )
 
         while self._running:
@@ -336,13 +340,17 @@ class SessionManager:
                         reason="EOD Watchdog", candle_time=now_ist, atr=0.0
                     )
 
-                # 3. Market close check
+                # 3. Daily Heartbeat / Health Ping
+                if self._s.heartbeat_enabled and now_t >= heartbeat_target:
+                    self._send_heartbeat(now_ist)
+
+                # 4. Market close check
                 if self._s.enforce_market_hours and now_t >= close_target:
                     logger.info("MCX Market close (%s IST). Sending EOD summary.", self._s.market_close)
                     self._send_eod_summary(now_ist)
                     break
 
-                # 4. New Candle evaluation (REST poll)
+                # 5. New Candle evaluation (REST poll)
                 if self._is_time_for_candle_check(now_ist):
                     self._check_and_process_new_candles()
 
@@ -739,8 +747,33 @@ class SessionManager:
     # Notifications & Standby
     # ------------------------------------------------------------------
 
+    def _get_uptime_str(self) -> str:
+        """Return human-readable duration since engine started, e.g. '2d 5h 14m'."""
+        now = datetime.now(tz=IST)
+        total_seconds = max(0, int((now - self._start_time).total_seconds()))
+        days, remainder = divmod(total_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0 or days > 0:
+            parts.append(f"{hours}h")
+        parts.append(f"{minutes}m")
+        return " ".join(parts)
+
+    def _get_system_info(self) -> str:
+        """Return host and OS process ID for daemon monitoring."""
+        import os
+        import platform
+        hostname = platform.node() or "RaspberryPi"
+        pid = os.getpid()
+        return f"Host: {hostname} • PID: {pid}"
+
     def _send_morning_briefing(self) -> None:
-        today_date = datetime.now(tz=IST).date()
+        now_ist = datetime.now(tz=IST)
+        today_date = now_ist.date()
         if self._morning_briefing_date == today_date:
             return
 
@@ -755,6 +788,9 @@ class SessionManager:
         except Exception as exc:
             logger.debug("Could not fetch commodity margins: %s", exc)
 
+        uptime_str = self._get_uptime_str()
+        system_info = self._get_system_info()
+
         self._notifier.morning_briefing(
             contract=self._active_symbol,
             capital=self._s.capital,
@@ -763,8 +799,38 @@ class SessionManager:
             entry_cutoff=self._s.entry_cutoff,
             eod_exit=self._s.eod_exit,
             mode=mode_label,
+            uptime=uptime_str,
+            system_info=system_info,
         )
         self._morning_briefing_date = today_date
+
+        # If engine started late (after heartbeat time), mark heartbeat sent so we don't double ping
+        hb_h, hb_m = self._s.heartbeat_hhmm
+        if now_ist.time() >= time(hb_h, hb_m):
+            self._heartbeat_date = today_date
+
+    def _send_heartbeat(self, now_ist: datetime) -> None:
+        today_date = now_ist.date()
+        if self._heartbeat_date == today_date:
+            return
+
+        uptime_str = self._get_uptime_str()
+        ltp = self._fetch_current_ltp()
+        pos = self._signal_engine.position or "FLAT"
+
+        self._notifier.heartbeat(
+            contract=self._active_symbol,
+            ltp=ltp,
+            position=pos,
+            uptime=uptime_str,
+            candles_evaluated=self._candles_today,
+            system_info=self._get_system_info(),
+        )
+        self._heartbeat_date = today_date
+        logger.info(
+            "Sent daily heartbeat health ping (uptime: %s, position: %s, candles: %d).",
+            uptime_str, pos, self._candles_today,
+        )
 
     def _send_eod_summary(self, now_ist: datetime) -> None:
         date_str = now_ist.strftime("%Y-%m-%d")

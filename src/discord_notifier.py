@@ -44,6 +44,7 @@ _COLOR = {
     "error":  0x8B0000,   # dark red
     "info":   0x888888,   # grey
     "warn":   0xFFBB33,   # amber
+    "heartbeat": 0x20B2AA, # sea green / teal
 }
 
 _MODE_LABEL = {True: "🔴 LIVE", False: "🟡 PAPER"}
@@ -177,6 +178,8 @@ class DiscordNotifier:
         entry_cutoff: str,
         eod_exit: str,
         mode: str,
+        uptime: str | None = None,
+        system_info: str | None = None,
     ) -> None:
         fields = [
             ("Contract",       contract,                           False),
@@ -187,9 +190,46 @@ class DiscordNotifier:
             ("EOD Exit",       f"{eod_exit} IST",                  True),
             ("Mode",           mode,                               True),
         ]
+        if uptime:
+            fields.append(("Engine Uptime", uptime, True))
+        if system_info:
+            fields.append(("Daemon Status", f"🟢 Running ({system_info})", True))
+
         self._send_embed(
             title="📊 MCX Gold — Morning Briefing",
             color=_COLOR["info"],
+            fields=fields,
+            mode=self._live,
+        )
+
+    def heartbeat(
+        self,
+        contract: str,
+        ltp: float,
+        position: str,
+        uptime: str,
+        candles_evaluated: int,
+        system_info: str | None = None,
+    ) -> None:
+        pos_str = (
+            f"🟢 {position}" if position in ("LONG", "BUY")
+            else (f"🔴 {position}" if position in ("SHORT", "SELL")
+                  else "⚪ FLAT (No Open Position)")
+        )
+        fields = [
+            ("Contract",        contract,                   True),
+            ("LTP",             f"₹{ltp:,.2f}" if ltp else "N/A", True),
+            ("Position",        pos_str,                    True),
+            ("Candles Checked", f"{candles_evaluated} 1H candles", True),
+            ("Engine Uptime",   uptime,                     True),
+            ("Daemon Status",   "🟢 Healthy (Raspberry Pi)", True),
+        ]
+        if system_info:
+            fields.append(("System Info", system_info, False))
+
+        self._send_embed(
+            title="💓 MCX Gold — Daily Heartbeat",
+            color=_COLOR["heartbeat"],
             fields=fields,
             mode=self._live,
         )

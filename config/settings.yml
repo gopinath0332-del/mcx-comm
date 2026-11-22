@@ -43,6 +43,10 @@ expiry_guard:
   tender_period_days: 5        # MCX physical delivery tender period (5 trading days before expiry)
   tender_buffer_days: 3        # Safety buffer before tender period begins (total 8 days before expiry)
 
+heartbeat:
+  enabled: true
+  time: "14:00"                # Midday health ping (HH:MM IST) for daemon reassurance
+
 sizing:
   use_atr_sizing: true      # ATR-based lot sizing from image.png formula
 
