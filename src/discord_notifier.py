@@ -187,7 +187,7 @@ class DiscordNotifier:
             ("Margin (Avail)", f"₹{available_cash:,.2f}" if available_cash else "N/A", True),
             ("Interval",       f"{candle_interval}H Heikin-Ashi",  True),
             ("Entry Cutoff",   f"{entry_cutoff} IST",              True),
-            ("EOD Exit",       f"{eod_exit} IST",                  True),
+            ("EOD Exit",       f"{eod_exit} IST" if eod_exit and eod_exit != "Disabled" else "Disabled (Swing)", True),
             ("Mode",           mode,                               True),
         ]
         if uptime:

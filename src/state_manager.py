@@ -109,10 +109,48 @@ class StateManager:
         """
         Startup reconciliation: compare saved state with broker positions.
 
+        In PAPER mode (live_mode=False):
+          - Restores saved state from state.json if present.
+          - Never queries broker positions and never clears state as stale.
+
+        In LIVE mode (live_mode=True):
+          - Compares saved state against open broker positions from Kite.
+          - Restores state if verified with broker.
+          - Clears stale state if broker shows no open position.
+          - Warns if broker has untracked position.
+
         Returns a status dict describing what was found / restored.
         """
         saved = self.load()
         broker_positions = self._fetch_broker_positions(kite, live_mode)
+
+        if not live_mode:
+            if saved is not None:
+                logger.info(
+                    "Reconciliation (PAPER): restoring saved state for %s (position=%s qty=%d)",
+                    saved.symbol, saved.position, saved.qty,
+                )
+                signal_engine.restore_state(
+                    position=saved.position,
+                    long_trail=saved.long_trail,
+                    short_trail=saved.short_trail,
+                    entry_bar=saved.entry_bar,
+                )
+                order_manager.restore_state(
+                    symbol=saved.symbol,
+                    qty=saved.qty,
+                    position=saved.position,
+                    entry_price=saved.entry_price,
+                )
+                return {
+                    "status": "restored",
+                    "restored": True,
+                    "symbol": saved.symbol,
+                    "position": saved.position,
+                    "qty": saved.qty,
+                }
+            logger.info("Reconciliation (PAPER): no open positions (clean start).")
+            return {"status": "clean", "restored": False}
 
         if saved is None and not broker_positions:
             logger.info("Reconciliation: no open positions (clean start).")

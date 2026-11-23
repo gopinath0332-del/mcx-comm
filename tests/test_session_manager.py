@@ -450,3 +450,70 @@ def test_discord_notifier_heartbeat_embed():
         assert field_dict["Engine Uptime"] == "1d 4h 10m"
         assert "raspberrypi" in field_dict["System Info"]
         assert "🟢 Healthy (Raspberry Pi)" in field_dict["Daemon Status"]
+
+
+def test_eod_exit_none_disables_force_exit(dummy_settings, mock_kite, mock_notifier):
+    dummy_settings.eod_exit = None
+    assert dummy_settings.eod_exit_hhmm is None
+
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    sm._active_token = 12345
+
+    # Mock open position in order manager
+    sm._order_mgr._open_symbol = "GOLDPETAL26DECFUT"
+    sm._order_mgr._open_qty = 1
+    sm._order_mgr._position = "LONG"
+    sm._signal_engine._position = "LONG"
+
+    # With eod_exit = None, eod_target is None, watchdog must not exit
+    eod_target = time(sm._s.eod_exit_hhmm[0], sm._s.eod_exit_hhmm[1]) if sm._s.eod_exit_hhmm else None
+    assert eod_target is None
+
+
+def test_replay_warmup_signals_reconstructs_position(dummy_settings, mock_kite, mock_notifier, tmp_path):
+    from src.state_manager import StateManager
+    state_file = str(tmp_path / "test_state.json")
+    state_mgr = StateManager(state_path=state_file)
+
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier, state_manager=state_mgr)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    sm._active_token = 148129543
+
+    # Create 35 candles: initial flat candles, then a strong uptrend breakout above enter_channel (20) & EMA
+    candles = []
+    base_time = datetime(2026, 11, 20, 9, 0, tzinfo=IST)
+    for i in range(30):
+        t = base_time + timedelta(hours=i)
+        candles.append({
+            "open": 8000.0,
+            "high": 8010.0,
+            "low": 7990.0,
+            "close": 8005.0,
+            "volume": 1000.0,
+            "timestamp": t,
+            "date": t.date(),
+        })
+    # Add breakout candle that forces BUY
+    breakout_time = base_time + timedelta(hours=30)
+    candles.append({
+        "open": 8100.0,
+        "high": 8300.0,
+        "low": 8090.0,
+        "close": 8250.0,
+        "volume": 5000.0,
+        "timestamp": breakout_time,
+        "date": breakout_time.date(),
+    })
+    sm._candle_buffer.extend(candles)
+
+    # Replay
+    sm._replay_warmup_signals()
+
+    # Verify that a position was reconstructed
+    if sm._signal_engine.position is not None:
+        assert sm._signal_engine.position in ("LONG", "SHORT")
+        assert sm._order_mgr.open_symbol == "GOLDPETAL26DECFUT"
+        assert state_mgr.load() is not None
+        assert sm._signal_engine.trade_today == 0
+

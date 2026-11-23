@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Optional
 import yaml
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -67,7 +68,13 @@ def _load_yaml_settings(yaml_path: str = SETTINGS_YML_PATH) -> dict:
     parsed["market_open"]         = str(timing.get("market_open", "09:00")).strip()
     parsed["market_close"]        = str(timing.get("market_close", "23:30")).strip()
     parsed["entry_cutoff"]        = str(timing.get("entry_cutoff", "22:00")).strip()
-    parsed["eod_exit"]            = str(timing.get("eod_exit", "23:25")).strip()
+    
+    raw_eod = timing.get("eod_exit")
+    if raw_eod is None or str(raw_eod).strip().lower() in ("none", "null", ""):
+        parsed["eod_exit"] = None
+    else:
+        parsed["eod_exit"] = str(raw_eod).strip()
+
     parsed["enforce_market_hours"] = bool(timing.get("enforce_market_hours", True))
     parsed["warmup_candles"]      = int(timing.get("warmup_candles", 150))
 
@@ -157,7 +164,7 @@ class Settings(BaseSettings):
     market_open: str = "09:00"
     market_close: str = "23:30"
     entry_cutoff: str = "22:00"
-    eod_exit: str = "23:25"
+    eod_exit: Optional[str] = None
     enforce_market_hours: bool = True
     warmup_candles: int = 150
 
@@ -223,10 +230,13 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_time_formats(self) -> "Settings":
         pattern = re.compile(r"^\d{2}:\d{2}$")
-        for field in ("market_open", "market_close", "entry_cutoff", "eod_exit", "heartbeat_time"):
+        for field in ("market_open", "market_close", "entry_cutoff", "heartbeat_time"):
             val = getattr(self, field)
             if not pattern.match(val):
                 raise ValueError(f"{field} must be HH:MM format, got '{val}'")
+        if self.eod_exit is not None:
+            if not pattern.match(self.eod_exit):
+                raise ValueError(f"eod_exit must be HH:MM format, got '{self.eod_exit}'")
         return self
 
     @model_validator(mode="after")
@@ -264,7 +274,9 @@ class Settings(BaseSettings):
         return int(h), int(m)
 
     @property
-    def eod_exit_hhmm(self) -> tuple[int, int]:
+    def eod_exit_hhmm(self) -> tuple[int, int] | None:
+        if not self.eod_exit:
+            return None
         h, m = self.eod_exit.split(":")
         return int(h), int(m)
 

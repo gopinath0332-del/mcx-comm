@@ -43,7 +43,7 @@ from src.indicators import apply_all
 from src.lot_sizer import LotSizer
 from src.order_manager import OrderManager
 from src.signal_engine import SignalEngine, SignalResult
-from src.state_manager import StateManager
+from src.state_manager import PositionState, StateManager
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,7 @@ class SessionManager:
         settings: Settings,
         kite_client=None,
         notifier: DiscordNotifier | None = None,
+        state_manager: StateManager | None = None,
     ) -> None:
         self._s = settings
 
@@ -101,7 +102,7 @@ class SessionManager:
             webhook_url=settings.discord_webhook_url,
             live_order_placement=settings.live_order_placement,
         )
-        self._state_mgr     = StateManager()
+        self._state_mgr     = state_manager or StateManager()
         self._signal_engine = SignalEngine(settings)
         self._lot_sizer     = LotSizer(
             capital=settings.capital,
@@ -300,16 +301,17 @@ class SessionManager:
 
         self._send_morning_briefing()
 
-        eod_h, eod_m = self._s.eod_exit_hhmm
+        eod_hhmm = self._s.eod_exit_hhmm
+        eod_target = time(eod_hhmm[0], eod_hhmm[1]) if eod_hhmm else None
         close_h, close_m = self._s.market_close_hhmm
         heartbeat_h, heartbeat_m = self._s.heartbeat_hhmm
-        eod_target = time(eod_h, eod_m)
         close_target = time(close_h, close_m)
         heartbeat_target = time(heartbeat_h, heartbeat_m)
 
+        eod_str = f"EOD exit at {self._s.eod_exit} IST" if self._s.eod_exit else "EOD exit disabled (Swing)"
         logger.info(
-            "MCX active polling loop started: EOD exit at %s IST | Market close at %s IST | Heartbeat at %s IST.",
-            self._s.eod_exit, self._s.market_close, self._s.heartbeat_time,
+            "MCX active polling loop started: %s | Market close at %s IST | Heartbeat at %s IST.",
+            eod_str, self._s.market_close, self._s.heartbeat_time,
         )
 
         while self._running:
@@ -322,7 +324,7 @@ class SessionManager:
                     continue
 
                 # 2. EOD force-exit
-                if now_t >= eod_target and self._order_mgr.open_symbol is not None:
+                if eod_target and now_t >= eod_target and self._order_mgr.open_symbol is not None:
                     logger.warning(
                         "🚨 [EOD WATCHDOG] Time %s ≥ %s with open position %s. Force exiting.",
                         now_ist.strftime("%H:%M:%S"), self._s.eod_exit,
@@ -637,10 +639,114 @@ class SessionManager:
                 len(self._candle_buffer), self._active_symbol,
                 self._last_processed_candle_time.strftime("%Y-%m-%d %H:%M") if self._last_processed_candle_time else "None",
             )
+            self._replay_warmup_signals()
             return len(self._candle_buffer)
         except Exception as exc:
             logger.warning("Could not pre-seed historical candles: %s", exc)
             return 0
+
+    def _replay_warmup_signals(self) -> None:
+        """
+        Replay pre-seeded historical candles through SignalEngine to deduce
+        if a strategy position is currently active and restore trailing SL.
+        Only runs if no position is currently tracked.
+        """
+        if self._signal_engine.position is not None:
+            logger.info(
+                "Warmup replay skipped: active position already tracked (%s).",
+                self._signal_engine.position,
+            )
+            return
+
+        if len(self._candle_buffer) < MIN_CANDLES:
+            logger.debug(
+                "Warmup replay skipped: candle buffer (%d) < MIN_CANDLES (%d).",
+                len(self._candle_buffer), MIN_CANDLES,
+            )
+            return
+
+        try:
+            df = pd.DataFrame(list(self._candle_buffer))
+            df = HeikinAshiConverter.convert(df)
+            df = apply_all(df, self._s)
+
+            # Replay all rows where indicators are non-NaN
+            valid_mask = ~(
+                df["ha_close"].isna()
+                | df["upper"].isna()
+                | df["lower"].isna()
+                | df["ema_trend"].isna()
+                | df["atr"].isna()
+            )
+            valid_df = df[valid_mask]
+            if valid_df.empty:
+                return
+
+            last_entry_res: SignalResult | None = None
+            last_entry_row = None
+
+            for _, row in valid_df.iterrows():
+                ist_ts = row["timestamp"]
+                res = self._signal_engine.evaluate(row, ist_ts)
+                if res.action in ("BUY", "SELL"):
+                    last_entry_res = res
+                    last_entry_row = row
+                elif res.action in ("EXIT_BUY", "EXIT_SELL"):
+                    last_entry_res = None
+                    last_entry_row = None
+
+            active_pos = self._signal_engine.position
+            if active_pos is not None:
+                entry_price = (
+                    last_entry_res.entry_price
+                    if (last_entry_res and last_entry_res.entry_price > 0)
+                    else float(last_entry_row["ha_close"] if last_entry_row is not None else valid_df.iloc[-1]["ha_close"])
+                )
+                atr_val = (
+                    last_entry_res.atr
+                    if (last_entry_res and last_entry_res.atr > 0)
+                    else float(valid_df.iloc[-1]["atr"])
+                )
+                trail_sl = self._signal_engine.long_trail if active_pos == "LONG" else self._signal_engine.short_trail
+                qty = self._lot_sizer.calculate(atr=atr_val)
+
+                self._order_mgr.restore_state(
+                    symbol=self._active_symbol,
+                    qty=qty,
+                    position=active_pos,
+                    entry_price=entry_price,
+                )
+                self._state_mgr.save(
+                    PositionState(
+                        position=active_pos,
+                        symbol=self._active_symbol,
+                        instrument_token=self._active_token,
+                        entry_price=entry_price,
+                        qty=qty,
+                        long_trail=self._signal_engine.long_trail,
+                        short_trail=self._signal_engine.short_trail,
+                        entry_timestamp=(
+                            last_entry_res.candle_time.isoformat()
+                            if (last_entry_res and last_entry_res.candle_time)
+                            else datetime.now(tz=IST).isoformat()
+                        ),
+                        entry_bar=self._signal_engine._entry_bar,
+                    )
+                )
+                logger.info(
+                    "🔄 Warmup trade replay: Reconstructed active %s position for %s "
+                    "(entry=₹%.2f, qty=%d, trail=₹%s). Restored into state.",
+                    active_pos, self._active_symbol, entry_price, qty,
+                    f"{trail_sl:.2f}" if trail_sl is not None else "None",
+                )
+            else:
+                logger.info("Warmup trade replay: Strategy position is currently FLAT.")
+
+            # Reset daily trade counter so warmup bars don't inflate today's count
+            self._signal_engine.trade_today = 0
+
+        except Exception as exc:
+            logger.warning("Error during warmup trade replay: %s", exc)
 
     # ------------------------------------------------------------------
     # Tender / Expiry Guard & Contract Rollover
