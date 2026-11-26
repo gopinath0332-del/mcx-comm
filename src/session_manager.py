@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from collections import deque
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -36,7 +37,11 @@ except Exception:
     IST = pytz.timezone("Asia/Kolkata")
 
 from config.settings import Settings
-from src.candle_builder import Candle, HeikinAshiConverter
+from src.candle_builder import (
+    Candle,
+    HeikinAshiConverter,
+    stitch_back_adjusted_candles,
+)
 from src.contract_selector import ContractSelector
 from src.discord_notifier import DiscordNotifier
 from src.indicators import apply_all
@@ -118,14 +123,28 @@ class SessionManager:
             lot_sizer=self._lot_sizer,
         )
 
-        # Contract selection
+        # Contract selection (execution vs signal feed)
         self._contract_selector = ContractSelector(
             instrument_prefix=settings.instrument_prefix,
+            exchange="MCX",
+        )
+        self._signal_selector = ContractSelector(
+            instrument_prefix=settings.effective_signal_prefix,
             exchange="MCX",
         )
         self._active_symbol: str = ""
         self._active_token: int  = 0
         self._active_expiry: date | None = None
+
+        # Continuous B-ADJ signal stitching state (signal back-month -> signal active)
+        self._signal_symbol: str = ""
+        self._signal_token: int = 0
+        self._signal_expiry: date | None = None
+        self._back_symbol: str = ""
+        self._back_token: int = 0
+        self._back_expiry: date | None = None
+        self._rollover_dt: datetime | None = None
+        self._back_offset: float = 0.0
 
         # Candle buffer & state tracking
         self._candle_buffer: deque[dict] = deque(maxlen=500)
@@ -416,11 +435,18 @@ class SessionManager:
         now_ist = datetime.now(tz=IST)
         from_dt = now_ist.date() - timedelta(days=3)
 
+        use_back = bool(
+            self._back_token and self._rollover_dt and now_ist < self._rollover_dt
+        )
+        base_token = self._signal_token or self._active_token
+        poll_token = self._back_token if use_back else base_token
+        offset = self._back_offset if use_back else 0.0
+
         from kiteconnect.exceptions import TokenException
 
         try:
             records = self._kite.historical_data(
-                instrument_token=self._active_token,
+                instrument_token=poll_token,
                 from_date=from_dt,
                 to_date=now_ist,
                 interval="60minute",
@@ -461,10 +487,10 @@ class SessionManager:
                 continue
 
             candle_data = {
-                "open":      float(rec.get("open",   0.0)),
-                "high":      float(rec.get("high",   0.0)),
-                "low":       float(rec.get("low",    0.0)),
-                "close":     float(rec.get("close",  0.0)),
+                "open":      float(rec.get("open",   0.0)) + offset,
+                "high":      float(rec.get("high",   0.0)) + offset,
+                "low":       float(rec.get("low",    0.0)) + offset,
+                "close":     float(rec.get("close",  0.0)) + offset,
                 "volume":    float(rec.get("volume", 0.0)),
                 "timestamp": ist_ts,
                 "date":      ist_ts.date(),
@@ -562,16 +588,24 @@ class SessionManager:
             # Evaluate signals
             result = self._signal_engine.evaluate(last, ist_ts)
 
-            if result.action == "BUY":
-                self._order_mgr.handle_buy(
-                    self._active_symbol, self._active_token, result, ist_ts
-                )
-            elif result.action == "SELL":
-                self._order_mgr.handle_sell(
-                    self._active_symbol, self._active_token, result, ist_ts
-                )
+            if result.action in ("BUY", "SELL"):
+                exec_res = self._scale_result_for_execution(result, float(last["close"]))
+                if result.action == "BUY":
+                    self._order_mgr.handle_buy(
+                        self._active_symbol, self._active_token, exec_res, ist_ts
+                    )
+                else:
+                    self._order_mgr.handle_sell(
+                        self._active_symbol, self._active_token, exec_res, ist_ts
+                    )
             elif result.action in ("EXIT_BUY", "EXIT_SELL"):
-                self._order_mgr.handle_exit(result, ist_ts, exit_price=last["ha_close"])
+                exec_res = self._scale_result_for_execution(result, float(last["close"]))
+                exit_px = (
+                    exec_res.entry_price
+                    if (self._signal_token and self._signal_token != self._active_token and exec_res.entry_price > 0)
+                    else float(last["ha_close"])
+                )
+                self._order_mgr.handle_exit(exec_res, ist_ts, exit_price=exit_px)
 
         except Exception as exc:
             logger.error("Error processing candle at %s: %s", candle, exc, exc_info=True)
@@ -601,25 +635,136 @@ class SessionManager:
     # Historical pre-seed
     # ------------------------------------------------------------------
 
+    def _scale_result_for_execution(
+        self, result: SignalResult, signal_ref_price: float
+    ) -> SignalResult:
+        """
+        When signal feed (e.g. MCX:GOLD, 10g) differs from execution contract
+        (e.g. MCX:GOLDPETAL, 1g), scale price/ATR/trail_sl to the execution
+        contract's unit price so LotSizer and OrderManager stay accurate.
+        """
+        if not self._signal_token or self._signal_token == self._active_token:
+            return result
+
+        exec_ltp = self._fetch_current_ltp()
+        if exec_ltp <= 0 or signal_ref_price <= 0:
+            return result
+
+        scale = exec_ltp / signal_ref_price
+        return replace(
+            result,
+            entry_price=exec_ltp,
+            atr=result.atr * scale,
+            trail_sl=(result.trail_sl * scale if result.trail_sl is not None else None),
+        )
+
+    def _resolve_signal_contract(self) -> None:
+        """
+        Resolve the signal-feed contract (e.g. MCX:GOLD) and its back-month
+        contract (if still listed) + rollover timestamp for 2-contract
+        back-adjusted (B-ADJ) continuous signal generation.
+        """
+        self._signal_symbol = self._active_symbol
+        self._signal_token = self._active_token
+        self._signal_expiry = self._active_expiry
+        self._back_symbol = ""
+        self._back_token = 0
+        self._back_expiry = None
+        self._rollover_dt = None
+        self._back_offset = 0.0
+
+        if not self._kite or not self._active_symbol:
+            return
+
+        if self._s.effective_signal_prefix.upper() != self._s.instrument_prefix.upper():
+            try:
+                sig_sym, sig_tok = self._signal_selector.get_active_contract(
+                    self._kite, tender_cutoff_days=self._s.tender_cutoff_days
+                )
+                sig_exp = self._signal_selector.get_contract_expiry(self._kite, sig_sym)
+                self._signal_symbol = sig_sym
+                self._signal_token = sig_tok
+                self._signal_expiry = sig_exp
+                logger.info(
+                    "Signal feed contract: %s (token=%d, expiry=%s) -> executing on %s",
+                    self._signal_symbol,
+                    self._signal_token,
+                    sig_exp.strftime("%Y-%m-%d") if sig_exp else "N/A",
+                    self._active_symbol,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not resolve signal contract for %s (%s); falling back to %s.",
+                    self._s.effective_signal_prefix, exc, self._active_symbol,
+                )
+
+        back_info = self._signal_selector.get_back_month_contract(
+            self._kite, self._signal_symbol
+        )
+        if back_info:
+            back_sym, back_tok, back_exp = back_info
+            self._back_symbol = back_sym
+            self._back_token = back_tok
+            self._back_expiry = back_exp
+            rollover_date = back_exp - timedelta(days=self._s.tender_period_days)
+            self._rollover_dt = datetime.combine(rollover_date, time(0, 0), tzinfo=IST)
+            logger.info(
+                "Continuous B-ADJ signal feed: %s (pre-%s) -> %s",
+                back_sym,
+                rollover_date.strftime("%Y-%m-%d"),
+                self._signal_symbol,
+            )
+
     def _preseed_historical_candles(self) -> int:
         """
         Pre-load recent closed 1H OHLCV candles from Kite historical API into buffer.
+        Uses 2-contract back-adjusted (B-ADJ) stitching when a back-month contract is available.
         Returns the number of candles loaded.
         """
         if not self._kite or not self._active_token:
             return 0
         try:
+            self._resolve_signal_contract()
+            sig_token = self._signal_token or self._active_token
+            sig_symbol = self._signal_symbol or self._active_symbol
             now_ist  = datetime.now(tz=IST)
             from_dt  = now_ist.date() - timedelta(days=15)
-            records  = self._kite.historical_data(
-                instrument_token=self._active_token,
+            active_records = self._kite.historical_data(
+                instrument_token=sig_token,
                 from_date=from_dt,
                 to_date=now_ist,
                 interval="60minute",
             )
-            if not records:
-                logger.warning("No historical candles returned for %s.", self._active_symbol)
+            if not active_records:
+                logger.warning("No historical candles returned for %s.", sig_symbol)
                 return 0
+
+            records = active_records
+            if self._back_token and self._rollover_dt:
+                try:
+                    back_records = self._kite.historical_data(
+                        instrument_token=self._back_token,
+                        from_date=from_dt,
+                        to_date=now_ist,
+                        interval="60minute",
+                    )
+                    if back_records:
+                        records, self._back_offset = stitch_back_adjusted_candles(
+                            back_records, active_records, self._rollover_dt
+                        )
+                        logger.info(
+                            "Stitched %s + %s (B-ADJ offset=%.2f, rollover=%s, total=%d candles).",
+                            self._back_symbol,
+                            sig_symbol,
+                            self._back_offset,
+                            self._rollover_dt.strftime("%Y-%m-%d"),
+                            len(records),
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not fetch back-month candles for %s (%s); using %s only.",
+                        self._back_symbol, exc, sig_symbol,
+                    )
 
             interval_td = timedelta(minutes=self._s.candle_interval_minutes)
             self._candle_buffer.clear()
@@ -727,6 +872,12 @@ class SessionManager:
                     if (last_entry_res and last_entry_res.atr > 0)
                     else float(valid_df.iloc[-1]["atr"])
                 )
+                if self._signal_token and self._signal_token != self._active_token:
+                    exec_ltp = self._fetch_current_ltp()
+                    sig_ref = float(valid_df.iloc[-1]["close"])
+                    if exec_ltp > 0 and sig_ref > 0:
+                        atr_val *= exec_ltp / sig_ref
+                        entry_price = exec_ltp
                 trail_sl = self._signal_engine.long_trail if active_pos == "LONG" else self._signal_engine.short_trail
                 qty = self._lot_sizer.calculate(atr=atr_val)
 

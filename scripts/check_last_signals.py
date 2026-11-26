@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pandas as pd
 from config.settings import get_settings
-from src.candle_builder import HeikinAshiConverter
+from src.candle_builder import HeikinAshiConverter, stitch_back_adjusted_candles
 from src.contract_selector import ContractSelector
 from src.indicators import apply_all
 from src.kite_auth import build_authenticated_kite
@@ -46,16 +46,22 @@ def main():
         print(f"❌ Failed to authenticate Kite: {exc}")
         return
 
-    # 2. Select active contract
-    selector = ContractSelector(instrument_prefix=settings.instrument_prefix)
+    # 2. Select execution & signal contracts
+    exec_selector = ContractSelector(instrument_prefix=settings.instrument_prefix)
+    sig_selector = ContractSelector(instrument_prefix=settings.effective_signal_prefix)
     try:
-        symbol, token = selector.get_active_contract(kite)
-        print(f" Active Contract: {symbol} (Token: {token})")
+        exec_symbol, _ = exec_selector.get_active_contract(
+            kite, tender_cutoff_days=settings.tender_cutoff_days
+        )
+        symbol, token = sig_selector.get_active_contract(
+            kite, tender_cutoff_days=settings.tender_cutoff_days
+        )
+        print(f" Execution Contract: {exec_symbol} | Signal Contract: {symbol} (Token: {token})")
     except Exception as exc:
         print(f"❌ Failed to resolve active contract: {exc}")
         return
 
-    # 3. Fetch historical 60minute candles
+    # 3. Fetch historical 60minute candles (with 2-contract B-ADJ stitch if back-month available)
     now_ist = datetime.now(tz=IST)
     from_date = now_ist.date() - timedelta(days=60)
     print(f" Fetching 60minute candles from {from_date} to {now_ist.date()}...")
@@ -70,6 +76,30 @@ def main():
     except Exception as exc:
         print(f"❌ Failed to fetch historical data: {exc}")
         return
+
+    back_info = sig_selector.get_back_month_contract(kite, symbol)
+    if back_info and records:
+        back_sym, back_tok, back_exp = back_info
+        rollover_dt = datetime.combine(
+            back_exp - timedelta(days=settings.tender_period_days),
+            time(0, 0),
+            tzinfo=IST,
+        )
+        try:
+            back_records = kite.historical_data(
+                instrument_token=back_tok,
+                from_date=from_date,
+                to_date=now_ist,
+                interval="60minute",
+            )
+            if back_records:
+                records, offset = stitch_back_adjusted_candles(back_records, records, rollover_dt)
+                print(
+                    f" Stitched B-ADJ continuous feed: {back_sym} -> {symbol} "
+                    f"(rollover={rollover_dt.strftime('%Y-%m-%d')}, offset={offset:+.2f})"
+                )
+        except Exception as exc:
+            print(f"⚠️ Could not fetch back-month {back_sym}: {exc}")
 
     if not records:
         print("❌ No historical candles returned from Kite.")
@@ -147,6 +177,43 @@ def main():
             print(f"[{time_str}] 👉 {s['action']} at HA C=₹{s['ha_close']:.2f} (Raw C=₹{s['raw_close']:.2f}) | {s['lots']} lots | ATR=₹{s['atr']:.2f} | {trail_str}")
         else:
             print(f"[{time_str}] 🛑 {s['action']} at HA C=₹{s['ha_close']:.2f} (Raw C=₹{s['raw_close']:.2f}) | Reason: {s['reason']}")
+
+    # Print past 4 trades (paired entry/exit) for easy TradingView cross-check
+    trades = []
+    open_trade = None
+    for s in signals:
+        if s["action"] in ("BUY", "SELL"):
+            open_trade = {
+                "dir": "LONG" if s["action"] == "BUY" else "SHORT",
+                "entry_time": s["time"],
+                "entry_price": s["ha_close"],
+                "lots": s["lots"],
+            }
+        elif s["action"] in ("EXIT_BUY", "EXIT_SELL") and open_trade is not None:
+            open_trade["exit_time"] = s["time"]
+            open_trade["exit_price"] = s["ha_close"]
+            open_trade["reason"] = s["reason"]
+            trades.append(open_trade)
+            open_trade = None
+    if open_trade is not None:
+        open_trade["exit_time"] = None
+        open_trade["exit_price"] = None
+        open_trade["reason"] = "OPEN"
+        trades.append(open_trade)
+
+    print("\n--- Past 4 Trades (Entry / Exit) ---")
+    for i, t in enumerate(trades[-4:], 1):
+        ent = t["entry_time"].strftime("%Y-%m-%d %H:%M IST")
+        if t["exit_time"]:
+            ext = t["exit_time"].strftime("%Y-%m-%d %H:%M IST")
+            print(
+                f"{i}. {t['dir']:5s} | Entry: {ent} @ ₹{t['entry_price']:.2f} "
+                f"| Exit: {ext} @ ₹{t['exit_price']:.2f} ({t['reason']})"
+            )
+        else:
+            print(
+                f"{i}. {t['dir']:5s} | Entry: {ent} @ ₹{t['entry_price']:.2f} | Exit: OPEN"
+            )
 
     print("\n" + "=" * 60)
     last_sig = signals[-1]

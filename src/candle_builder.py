@@ -223,3 +223,68 @@ class HeikinAshiConverter:
         df["ha_low"]   = ha_low
 
         return df
+
+
+# ======================================================================
+# Continuous Back-Adjusted (B-ADJ) Contract Stitching
+# ======================================================================
+
+def _record_ts_ist(rec: dict) -> datetime:
+    """Extract a timezone-aware IST datetime from a Kite candle record."""
+    rec_dt = rec.get("date")
+    if hasattr(rec_dt, "tzinfo") and rec_dt.tzinfo:
+        return rec_dt.astimezone(IST)
+    if hasattr(rec_dt, "replace"):
+        return rec_dt.replace(tzinfo=IST)
+    return datetime.now(tz=IST)
+
+
+def stitch_back_adjusted_candles(
+    back_records: list[dict],
+    active_records: list[dict],
+    rollover_dt: datetime,
+) -> tuple[list[dict], float]:
+    """
+    Stitch a 2-contract back-adjusted (B-ADJ) continuous candle series.
+
+    Candles strictly before `rollover_dt` are taken from `back_records` (e.g. NOV)
+    and shifted by `active.close - back.close` at the latest overlapping bar
+    at or before `rollover_dt`. Candles at or after `rollover_dt` are taken
+    unmodified from `active_records` (e.g. DEC).
+
+    Returns (stitched_records, back_offset).
+    """
+    if not back_records:
+        return list(active_records), 0.0
+
+    back_pre = [r for r in back_records if _record_ts_ist(r) < rollover_dt]
+    active_post = [r for r in active_records if _record_ts_ist(r) >= rollover_dt]
+
+    if not back_pre:
+        return list(active_records), 0.0
+
+    # Compute B-ADJ spread offset at the latest overlapping bar <= rollover_dt
+    active_by_ts = {_record_ts_ist(r): r for r in active_records}
+    offset: float | None = None
+    for rec in reversed(back_pre):
+        ts = _record_ts_ist(rec)
+        if ts in active_by_ts:
+            offset = float(active_by_ts[ts]["close"]) - float(rec["close"])
+            break
+
+    if offset is None:
+        if active_post:
+            offset = float(active_post[0]["open"]) - float(back_pre[-1]["close"])
+        else:
+            offset = 0.0
+
+    adjusted_pre = []
+    for rec in back_pre:
+        shifted = dict(rec)
+        shifted["open"] = float(rec["open"]) + offset
+        shifted["high"] = float(rec["high"]) + offset
+        shifted["low"] = float(rec["low"]) + offset
+        shifted["close"] = float(rec["close"]) + offset
+        adjusted_pre.append(shifted)
+
+    return adjusted_pre + active_post, offset

@@ -40,6 +40,8 @@ def _load_yaml_settings(yaml_path: str = SETTINGS_YML_PATH) -> dict:
     strat = doc.get("strategy", {})
     parsed["strategy_name"]      = str(strat.get("name", "GoldTrendFilter")).strip()
     parsed["instrument_prefix"]  = str(strat.get("instrument_prefix", "MCX:GOLDPETAL")).strip()
+    sig_pref = strat.get("signal_instrument_prefix")
+    parsed["signal_instrument_prefix"] = str(sig_pref).strip() if sig_pref else None
 
     trade = doc.get("trade", {})
     parsed["capital"]            = float(trade.get("capital", 200000.0))
@@ -139,6 +141,12 @@ class Settings(BaseSettings):
     # ---- Strategy (settings.yml) -----------------------------------
     strategy_name: str = "GoldTrendFilter"
     instrument_prefix: str = "MCX:GOLDPETAL"
+    signal_instrument_prefix: Optional[str] = None
+
+    @property
+    def effective_signal_prefix(self) -> str:
+        """Signal feed instrument prefix (defaults to execution instrument_prefix)."""
+        return self.signal_instrument_prefix or self.instrument_prefix
     capital: float = 200000.0
     base_risk_pct: float = 2.0
     lot_multiplier: int = 1

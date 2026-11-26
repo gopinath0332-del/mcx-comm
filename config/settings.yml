@@ -6,7 +6,8 @@
 
 strategy:
   name: "GoldTrendFilter"
-  instrument_prefix: "MCX:GOLDPETAL"   # base symbol prefix for contract lookup
+  instrument_prefix: "MCX:GOLDPETAL"         # execution contract prefix
+  signal_instrument_prefix: "MCX:GOLD"     # signal feed prefix (GOLD1! B-ADJ)
 
 trade:
   capital: 200000           # Fixed capital in INR (₹2,00,000)

@@ -563,3 +563,70 @@ def test_check_and_process_new_candles_reauths_on_token_exception(
         assert processed == 0
         mock_auth.assert_called_once()
 
+
+def test_stitch_back_adjusted_candles():
+    """Back-month candles before rollover_dt are shifted by (active.close - back.close)."""
+    from src.candle_builder import stitch_back_adjusted_candles
+
+    rollover = datetime(2026, 11, 25, 0, 0, tzinfo=IST)
+    t1 = datetime(2026, 11, 24, 21, 0, tzinfo=IST)
+    t2 = datetime(2026, 11, 24, 22, 0, tzinfo=IST)
+    t3 = datetime(2026, 11, 25, 9, 0, tzinfo=IST)
+
+    # Back-month (NOV) is 50 points lower than Active (DEC) at t2 (12050 vs 12000)
+    back = [
+        {"date": t1, "open": 12010, "high": 12020, "low": 11990, "close": 12000, "volume": 100},
+        {"date": t2, "open": 12000, "high": 12010, "low": 11980, "close": 12000, "volume": 100},
+    ]
+    active = [
+        {"date": t2, "open": 12050, "high": 12060, "low": 12030, "close": 12050, "volume": 50},
+        {"date": t3, "open": 12050, "high": 12070, "low": 12040, "close": 12060, "volume": 200},
+    ]
+
+    stitched, offset = stitch_back_adjusted_candles(back, active, rollover)
+    assert offset == 50.0
+    assert len(stitched) == 3
+    # Pre-rollover candles shifted by +50
+    assert stitched[0]["close"] == 12050.0
+    assert stitched[1]["close"] == 12050.0
+    # Post-rollover candle unmodified from active
+    assert stitched[2]["close"] == 12060.0
+
+
+def test_get_back_month_contract():
+    """ContractSelector.get_back_month_contract returns the prior expiring future."""
+    from datetime import date
+    from src.contract_selector import ContractSelector
+
+    cs = ContractSelector(instrument_prefix="GOLDPETAL", exchange="MCX")
+    kite = MagicMock()
+    kite.instruments.return_value = [
+        {"instrument_type": "FUT", "name": "GOLDPETAL", "tradingsymbol": "GOLDPETAL26NOVFUT", "instrument_token": 111, "expiry": date(2026, 11, 30)},
+        {"instrument_type": "FUT", "name": "GOLDPETAL", "tradingsymbol": "GOLDPETAL26DECFUT", "instrument_token": 222, "expiry": date(2026, 12, 31)},
+        {"instrument_type": "FUT", "name": "GOLDPETAL", "tradingsymbol": "GOLDPETAL27JANFUT", "instrument_token": 333, "expiry": date(2027, 1, 29)},
+    ]
+
+    res = cs.get_back_month_contract(kite, "GOLDPETAL26DECFUT")
+    assert res == ("GOLDPETAL26NOVFUT", 111, date(2026, 11, 30))
+    assert cs.get_back_month_contract(kite, "GOLDPETAL26NOVFUT") is None
+
+
+def test_cross_instrument_signal_scaling(dummy_settings, mock_kite, mock_notifier):
+    """Signals on MCX:GOLD (10g) scale entry/ATR/trail_sl to MCX:GOLDPETAL (1g)."""
+    from src.signal_engine import SignalResult
+
+    dummy_settings.signal_instrument_prefix = "MCX:GOLD"
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    sm._active_token = 148129543
+    sm._signal_symbol = "GOLD27FEBFUT"
+    sm._signal_token = 143342855
+    mock_kite.ltp.return_value = {"MCX:GOLDPETAL26DECFUT": {"last_price": 12500.0}}
+
+    sig = SignalResult(action="SELL", entry_price=125000.0, trail_sl=127000.0, atr=1000.0)
+    scaled = sm._scale_result_for_execution(sig, signal_ref_price=125000.0)
+
+    assert scaled.entry_price == 12500.0
+    assert scaled.atr == pytest.approx(100.0)
+    assert scaled.trail_sl == pytest.approx(12700.0)
+

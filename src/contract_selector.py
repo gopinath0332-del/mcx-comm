@@ -110,15 +110,56 @@ class ContractSelector:
             instruments = self._fetch_goldpetal_instruments(kite)
             for inst in instruments:
                 if inst.get("tradingsymbol", "").upper() == symbol.upper():
-                    expiry = inst.get("expiry")
-                    if isinstance(expiry, str):
-                        return datetime.strptime(expiry, "%Y-%m-%d").date()
-                    elif hasattr(expiry, "date"):
-                        return expiry.date()
-                    elif isinstance(expiry, date):
-                        return expiry
+                    return self._parse_expiry(inst.get("expiry"))
         except Exception as exc:
             logger.warning("Could not resolve expiry for symbol %s: %s", symbol, exc)
+        return None
+
+    def get_back_month_contract(
+        self, kite, active_symbol: str
+    ) -> tuple[str, int, date] | None:
+        """
+        Return the immediately preceding contract (symbol, token, expiry)
+        before `active_symbol` if it is still listed on Kite, else None.
+        Used for 2-contract back-adjusted (B-ADJ) continuous 1H signal stitching.
+        """
+        try:
+            instruments = self._fetch_goldpetal_instruments(kite)
+            dated: list[tuple[date, dict]] = []
+            for inst in instruments:
+                exp = self._parse_expiry(inst.get("expiry"))
+                if exp is not None:
+                    dated.append((exp, inst))
+            dated.sort(key=lambda x: x[0])
+
+            for idx, (_, inst) in enumerate(dated):
+                if inst.get("tradingsymbol", "").upper() == active_symbol.upper():
+                    if idx > 0:
+                        prev_exp, prev_inst = dated[idx - 1]
+                        return (
+                            prev_inst["tradingsymbol"],
+                            int(prev_inst["instrument_token"]),
+                            prev_exp,
+                        )
+                    return None
+        except Exception as exc:
+            logger.warning("Could not resolve back-month contract for %s: %s", active_symbol, exc)
+        return None
+
+    @staticmethod
+    def _parse_expiry(expiry) -> date | None:
+        """Normalize Kite expiry field (str, datetime, or date) to date."""
+        if expiry is None:
+            return None
+        if isinstance(expiry, str):
+            try:
+                return datetime.strptime(expiry, "%Y-%m-%d").date()
+            except ValueError:
+                return None
+        if hasattr(expiry, "date"):
+            return expiry.date()
+        if isinstance(expiry, date):
+            return expiry
         return None
 
     def clear_cache(self) -> None:
