@@ -510,10 +510,56 @@ def test_replay_warmup_signals_reconstructs_position(dummy_settings, mock_kite, 
     # Replay
     sm._replay_warmup_signals()
 
-    # Verify that a position was reconstructed
+        # Verify that a position was reconstructed
     if sm._signal_engine.position is not None:
         assert sm._signal_engine.position in ("LONG", "SHORT")
         assert sm._order_mgr.open_symbol == "GOLDPETAL26DECFUT"
         assert state_mgr.load() is not None
         assert sm._signal_engine.trade_today == 0
+
+
+def test_run_reauthenticates_after_overnight_standby(dummy_settings, mock_kite, mock_notifier):
+    """Ensure waking from overnight standby reloads/validates Kite token before active session."""
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+
+    # Simulate: 1st loop at 23:35 (outside hours -> standby), 2nd loop at 09:01 next day (active)
+    off_hours = datetime(2026, 11, 24, 23, 35, 0, tzinfo=IST)
+    next_morning = datetime(2026, 11, 25, 9, 1, 0, tzinfo=IST)
+    sm._session_date = off_hours.date()
+
+    def stop_on_active():
+        sm._running = False
+
+    with patch("src.session_manager.datetime") as mock_dt, \
+         patch.object(sm, "_ensure_authenticated_kite") as mock_auth, \
+         patch.object(sm._contract_selector, "get_active_contract", return_value=("GOLDPETAL26DECFUT", 148129543)), \
+         patch.object(sm._contract_selector, "get_contract_expiry", return_value=None), \
+         patch.object(sm._state_mgr, "load", return_value=None), \
+         patch.object(sm._state_mgr, "reconcile"), \
+         patch.object(sm, "_preseed_historical_candles"), \
+         patch.object(sm, "_standby_sleep"), \
+         patch.object(sm, "_run_active_session", side_effect=stop_on_active):
+
+        mock_dt.now.side_effect = [off_hours, next_morning]
+        sm.run()
+
+        # Called once at startup and once after waking from standby
+        assert mock_auth.call_count == 2
+
+
+def test_check_and_process_new_candles_reauths_on_token_exception(
+    dummy_settings, mock_kite, mock_notifier
+):
+    """Ensure TokenException during candle polling triggers re-authentication."""
+    from kiteconnect.exceptions import TokenException
+
+    sm = SessionManager(settings=dummy_settings, kite_client=mock_kite, notifier=mock_notifier)
+    sm._active_symbol = "GOLDPETAL26DECFUT"
+    sm._active_token = 148129543
+    mock_kite.historical_data.side_effect = TokenException("Incorrect `api_key` or `access_token`.")
+
+    with patch.object(sm, "_ensure_authenticated_kite") as mock_auth:
+        processed = sm._check_and_process_new_candles()
+        assert processed == 0
+        mock_auth.assert_called_once()
 

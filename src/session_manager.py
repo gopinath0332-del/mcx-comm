@@ -184,6 +184,7 @@ class SessionManager:
         self._preseed_historical_candles()
 
         # 4. Main session lifecycle loop
+        needs_reauth = False
         while self._running:
             now_ist = datetime.now(tz=IST)
 
@@ -200,6 +201,7 @@ class SessionManager:
                     f"• Today is **{day_name}** — MCX is closed.\n"
                     f"• Engine is sleeping, will auto-resume on Monday 09:00 IST."
                 )
+                needs_reauth = True
                 self._standby_sleep()
                 continue
 
@@ -208,8 +210,17 @@ class SessionManager:
                     "⏸️ Outside MCX hours (%s IST). Entering standby.",
                     now_ist.strftime("%H:%M"),
                 )
+                needs_reauth = True
                 self._standby_sleep()
                 continue
+
+            # Re-validate / reload Kite token when waking from standby or on a new day
+            if needs_reauth or self._session_date != now_ist.date():
+                self._ensure_authenticated_kite()
+                if not self._running:
+                    return
+                self._session_date = now_ist.date()
+                needs_reauth = False
 
             # Within active market hours
             self._run_active_session()
@@ -405,6 +416,8 @@ class SessionManager:
         now_ist = datetime.now(tz=IST)
         from_dt = now_ist.date() - timedelta(days=3)
 
+        from kiteconnect.exceptions import TokenException
+
         try:
             records = self._kite.historical_data(
                 instrument_token=self._active_token,
@@ -412,6 +425,13 @@ class SessionManager:
                 to_date=now_ist,
                 interval="60minute",
             )
+        except TokenException as exc:
+            logger.warning(
+                "Kite token expired/invalid while fetching candles (%s). Re-authenticating...",
+                exc,
+            )
+            self._ensure_authenticated_kite()
+            return 0
         except Exception as exc:
             logger.warning("Could not fetch historical candles via REST: %s", exc)
             return 0
