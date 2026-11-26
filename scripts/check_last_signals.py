@@ -63,7 +63,7 @@ def main():
 
     # 3. Fetch historical 60minute candles (with 2-contract B-ADJ stitch if back-month available)
     now_ist = datetime.now(tz=IST)
-    from_date = now_ist.date() - timedelta(days=60)
+    from_date = now_ist.date() - timedelta(days=90)
     print(f" Fetching 60minute candles from {from_date} to {now_ist.date()}...")
 
     try:

@@ -147,7 +147,7 @@ class SessionManager:
         self._back_offset: float = 0.0
 
         # Candle buffer & state tracking
-        self._candle_buffer: deque[dict] = deque(maxlen=500)
+        self._candle_buffer: deque[dict] = deque(maxlen=1000)
         self._running: bool              = False
         self._last_ltp: float            = 0.0
         self._last_processed_candle_time: datetime | None = None
@@ -728,7 +728,7 @@ class SessionManager:
             sig_token = self._signal_token or self._active_token
             sig_symbol = self._signal_symbol or self._active_symbol
             now_ist  = datetime.now(tz=IST)
-            from_dt  = now_ist.date() - timedelta(days=15)
+            from_dt  = now_ist.date() - timedelta(days=90)
             active_records = self._kite.historical_data(
                 instrument_token=sig_token,
                 from_date=from_dt,

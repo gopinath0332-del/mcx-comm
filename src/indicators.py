@@ -106,6 +106,6 @@ def compute_atr(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
         (low - prev_close).abs(),
     ], axis=1).max(axis=1)
 
-    # EMA of True Range (matches PineScript ema(tr(true), atrperiod))
-    df["atr"] = tr.ewm(span=period, adjust=False).mean()
+    # RMA of True Range (Wilder's smoothing, matches TradingView ta.atr(period))
+    df["atr"] = tr.ewm(alpha=1.0 / period, adjust=False).mean()
     return df

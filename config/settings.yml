@@ -37,7 +37,7 @@ timing:
   entry_cutoff: "22:00"        # Stop new entries at 22:00 IST
   eod_exit: null               # Force-close at EOD (set null/disabled for multi-day swing trading; or "HH:MM" e.g. "23:25" for intraday)
   enforce_market_hours: true
-  warmup_candles: 150          # ~6 trading days of 1H history for indicator warm-up
+  warmup_candles: 900          # ~90 calendar days of 1H history for EMA(200) / HA / ATR warm-up
 
 expiry_guard:
   enabled: true
